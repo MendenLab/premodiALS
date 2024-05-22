@@ -1,0 +1,1432 @@
+---
+title: "Proteomics Premodials TF Christof Lenz"
+author: "Clara Meijs"
+date: "2023-10-06"
+output:
+  html_document:
+    df_print: paged
+    keep_md: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 5
+    theme: lumen
+---
+
+## Libraries
+
+```{r libraries}
+rm(list=ls())
+
+ library(pheatmap)
+ library(ggplot2)
+# library(matrixStats)
+# library(wesanderson)
+# library(clusterProfiler)
+# library(enrichplot)
+# library(msigdbr)
+ library(dichromat)
+ library(stringr)
+ library(dplyr)
+ library(ggrepel)
+ library(reshape2)
+ library(umap)
+ library(ggthemes)
+ library(cowplot)
+#library(MetaboAnalystR)
+library(vsn)
+library(DEP)
+library(readr)
+library(naniar)
+library(SummarizedExperiment)
+library(data.table)
+library(readxl)
+library(ggpubr)
+library(tibble)
+
+
+```
+
+## Set working directories
+
+```{r set-working-directories, message=FALSE, class.source = 'fold-hide'}
+# if you are using Rstudio run the following command, otherwise, set the working directory to the folder where this script is in
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# create directory for results
+dir.create(file.path(getwd(),'results'), showWarnings = FALSE)
+# create directory for plots
+dir.create(file.path(getwd(),'plots'), showWarnings = FALSE)
+```
+
+## Load data
+
+```{r load data}
+#load the dataset
+      TF_data = read.table(file = 'data/L_Tzeplaeff_TearFluidTable_NonNormalized_NonImputed.txt', sep = '\t', header = TRUE)
+      plasma_data = read.table(file = 'data/2023_37b_L_Tzeplaeff_PlasmaTable_NonNormalized_NonImputed.txt', sep = '\t', header = TRUE)
+      
+#select only Homo Sapiens genes (filter n=5)
+      dim(TF_data)
+      TF_data = TF_data[grep("Homo sapiens", TF_data$PG.Organisms),]
+      dim(TF_data)
+      
+      dim(plasma_data)
+      plasma_data = plasma_data[grep("Homo sapiens", plasma_data$PG.Organisms),]
+      dim(plasma_data)
+
+#take only gene name, UniProt accession number, and quantity columns
+      TF_data = TF_data[,c("PG.ProteinGroups", "PG.Genes", colnames(TF_data)[grep("PG.Quantity", colnames(TF_data))])]
+      dim(TF_data)
+      plasma_data = plasma_data[,c("PG.ProteinGroups", "PG.Genes", colnames(plasma_data)[grep("PG.Quantity", colnames(plasma_data))])]
+      dim(plasma_data)
+      
+      length(unique(c(TF_data$PG.ProteinGroups, plasma_data$PG.ProteinGroups)))
+      
+#remove proteins without name
+      TF_data$PG.Genes[TF_data$PG.Genes==";KRT10;KRT10"] = "KRT10"
+      TF_data$PG.Genes[TF_data$PG.Genes==";KRT84"] = "KRT84"
+      TF_data = TF_data[TF_data$PG.Genes!="",]
+      
+      plasma_data$PG.Genes[plasma_data$PG.Genes==";TGM3"] = "TGM3"
+      plasma_data$PG.Genes[plasma_data$PG.Genes==";ATP5MG;ATP5MG"] = "ATP5MG"
+      plasma_data$PG.Genes[plasma_data$PG.Genes==";NDUFA9"] = "NDUFA9"
+      plasma_data$PG.Genes[plasma_data$PG.Genes==";HBG1;HBG2"] = "HBG1"
+      plasma_data$PG.Genes[plasma_data$PG.Genes==";KRT10"] = "KRT10"
+      plasma_data = plasma_data[plasma_data$PG.Genes!="",]
+
+#select rows with duplicate A and duplicate B and check if the duplicates have the same order 
+      index_dup_A_TF = grep("_A_", colnames(TF_data))
+      index_dup_B_TF = grep("_B_", colnames(TF_data))
+      index_dup_A_plasma = grep("_A_", colnames(plasma_data))
+      index_dup_B_plasma = grep("_B_", colnames(plasma_data))
+      a = as.data.frame(cbind(colnames(TF_data[,index_dup_A_TF]), colnames(TF_data[,index_dup_B_TF])))
+      a = as.data.frame(cbind(colnames(plasma_data[,index_dup_A_plasma]), colnames(plasma_data[,index_dup_B_plasma])))
+#Conclusion, for plasma they are not the same order
+
+#shorten sample names
+      f = function(name){
+        a = str_split(name, pattern = "_")[[1]]
+        a = paste0(a[7], "_", a[8], "_",  a[9])
+        return(a)
+      }
+      
+      colnames(TF_data)[3:ncol(TF_data)] = as.vector(sapply(colnames(TF_data)[3:ncol(TF_data)], function(x) f(x)))
+      colnames(plasma_data)[3:ncol(plasma_data)] = as.vector(sapply(colnames(plasma_data)[3:ncol(plasma_data)], function(x) f(x)))
+
+#make NaN into NA
+      TF_data[TF_data == "NaN"] = NA
+      for(i in 1:ncol(TF_data)){TF_data[is.nan(TF_data[,i]),i] = NA}
+      plasma_data[plasma_data == "NaN"] = NA
+      for(i in 1:ncol(plasma_data)){plasma_data[is.nan(plasma_data[,i]),i] = NA}
+
+#take first gene name or first uniprot accession number
+      f = function(name){
+        a = str_split(name, pattern = ";")[[1]]
+        return(a[1])
+      }
+      TF_data[,"PG.ProteinGroups"] = as.vector(sapply(TF_data[,"PG.ProteinGroups"], function(x) f(x)))
+      TF_data[,"PG.Genes"] = as.vector(sapply(TF_data[,"PG.Genes"], function(x) f(x)))
+      plasma_data[,"PG.ProteinGroups"] = as.vector(sapply(plasma_data[,"PG.ProteinGroups"], function(x) f(x)))
+      plasma_data[,"PG.Genes"] = as.vector(sapply(plasma_data[,"PG.Genes"], function(x) f(x)))
+      
+      TF_data = TF_data[TF_data$PG.Genes!="",]
+      plasma_data = plasma_data[plasma_data$PG.Genes!="",]
+
+#make the gene names the rownames, after making them unique. 
+      rownames(TF_data) = make.unique(TF_data[,"PG.Genes"])
+      rownames(plasma_data) = make.unique(plasma_data[,"PG.Genes"])
+
+#make empty matrix for merged duplicates
+      plasma_merged = as.data.frame(matrix(data = NA, nrow = nrow(plasma_data), ncol = length(index_dup_A_plasma)+2))
+      TF_merged = as.data.frame(matrix(data = NA, nrow = nrow(TF_data), ncol = length(index_dup_A_TF)+2))
+      plasma_merged[,1:2] = plasma_data[,1:2]
+      TF_merged[,1:2] = TF_data[,1:2]
+      rownames(plasma_merged) = rownames(plasma_data)
+      rownames(TF_merged) = rownames(TF_data)
+      
+      sample_IDs_TF = colnames(TF_data)[index_dup_A_TF]
+      sample_IDs_TF = gsub("A_", "", sample_IDs_TF)
+      sample_IDs_plasma = colnames(plasma_data)[index_dup_A_plasma]
+      sample_IDs_plasma = gsub("A_", "", sample_IDs_plasma)
+      
+      colnames(TF_merged) = c("Uniprot", "Gene_Symbol", sample_IDs_TF)
+      colnames(plasma_merged) = c("Uniprot", "Gene_Symbol", sample_IDs_plasma)
+      
+      TF_difference = TF_missing = TF_merged
+      plasma_difference = plasma_missing = plasma_merged
+
+#perform merging of duplicates
+      for(i in 1:length(sample_IDs_plasma)){
+        for(j in 1:nrow(plasma_data)){
+        A = plasma_data[j,grep(sample_IDs_plasma[i], colnames(plasma_data))[1]]
+        B = plasma_data[j,grep(sample_IDs_plasma[i], colnames(plasma_data))[2]]
+        
+        mean = mean(c(A,B), na.rm = T)
+        difference = abs(A - B)
+        missing = sum(is.na(c(A,B)))
+        
+        plasma_merged[j, sample_IDs_plasma[i]] = mean
+        plasma_difference[j, sample_IDs_plasma[i]] = difference
+        plasma_missing[j, sample_IDs_plasma[i]] = missing
+        }}
+      
+      for(i in 1:length(sample_IDs_TF)){
+        for(j in 1:nrow(TF_data)){
+        A = TF_data[j,grep(sample_IDs_TF[i], colnames(TF_data))[1]]
+        B = TF_data[j,grep(sample_IDs_TF[i], colnames(TF_data))[2]]
+        
+        mean = mean(c(A,B), na.rm = T)
+        difference = abs(A - B)
+        missing = sum(is.na(c(A,B)))
+        
+        TF_merged[j, sample_IDs_TF[i]] = mean
+        TF_difference[j, sample_IDs_TF[i]] = difference
+        TF_missing[j, sample_IDs_TF[i]] = missing
+        }}
+      
+      TF_merged[TF_merged == "NaN"] = NA
+      plasma_merged[plasma_merged == "NaN"] = NA
+      
+      #count missing
+      sum(is.na(TF_data))
+      sum(is.na(TF_merged))
+      sum(is.na(plasma_data))
+      sum(is.na(plasma_merged))
+      
+      #calculate relative variance
+      TF_relative_diff = (TF_difference[,3:ncol(TF_difference)]/TF_merged[,3:ncol(TF_difference)])*100
+      plasma_relative_diff = (plasma_difference[,3:ncol(plasma_difference)]/plasma_merged[,3:ncol(plasma_difference)])*100
+
+#make summarized experiments
+#TF
+      TF_merged2 = TF_merged[,3:ncol(TF_merged)]
+      abundance.columns <- 1:ncol(TF_merged2) # get abundance column numbers
+      clin = data.frame(label = colnames(TF_merged2)[1:ncol(TF_merged2)],  #very limited clinical variables
+                        condition = rep("control", ncol(TF_merged2)) ,
+                        replicate = 1:ncol(TF_merged2))
+      
+      TF_merged2$name = rownames(TF_merged2)
+      TF_merged2$ID = TF_merged$Uniprot
+      experimental.design = clin
+      se_TF <- make_se(TF_merged2, abundance.columns, experimental.design)
+#plasma        
+      plasma_merged2 = plasma_merged[,3:ncol(plasma_merged)]
+      abundance.columns <- 1:ncol(plasma_merged2) # get abundance column numbers
+      clin = data.frame(label = colnames(plasma_merged2),  #very limited clinical variables
+                        condition = rep("control", ncol(plasma_merged2)) ,
+                        replicate = 1:ncol(plasma_merged2))
+      
+      plasma_merged2$name = rownames(plasma_merged2)
+      plasma_merged2$ID = plasma_merged$Uniprot
+      experimental.design = clin
+      se_plasma <- make_se(plasma_merged2, abundance.columns, experimental.design)
+
+
+#save data
+write.csv(plasma_data, "results/raw_data_plasma.csv", row.names=TRUE)
+write.csv(TF_data, "results/raw_data_TF.csv", row.names=TRUE)
+write.csv(plasma_merged, "results/raw_data_no_duplicates_plasma.csv", row.names=TRUE)
+write.csv(TF_merged, "results/raw_data_no_duplicates_TF.csv", row.names=TRUE)
+write.csv(plasma_difference, "results/difference_of_duplicates_plasma.csv", row.names=TRUE)
+write.csv(TF_difference, "results/variance_of_duplicates_TF.csv", row.names=TRUE)
+write.csv(plasma_relative_diff, "results/relative_difference_of_duplicates_plasma.csv", row.names=TRUE)
+write.csv(TF_relative_diff, "results/relative_difference_of_duplicates_TF.csv", row.names=TRUE)
+write.csv(plasma_missing, "results/missing_within_duplicates_plasma.csv", row.names=TRUE)
+write.csv(TF_missing, "results/missing_within_duplicates_TF.csv", row.names=TRUE)
+```
+
+## Scatterplots duplicates
+
+```{r scatterplots duplicates}
+#create the duplicate matrices using the duplicates indices
+plasma_A = plasma_data[,index_dup_A_plasma]
+plasma_B = plasma_data[,index_dup_B_plasma]
+TF_A = TF_data[,index_dup_A_TF]
+TF_B = TF_data[,index_dup_B_TF]
+
+#remove the "A_" and "B_" from the colnames
+colnames(plasma_A) = gsub("A_", "", colnames(plasma_A))
+colnames(plasma_B) = gsub("B_", "", colnames(plasma_B))
+colnames(TF_A) = gsub("A_", "", colnames(TF_A))
+colnames(TF_B) = gsub("B_", "", colnames(TF_B))
+
+#make the order of the matrices identical
+plasma_A = plasma_A[,sample_IDs_plasma]
+plasma_B = plasma_B[,sample_IDs_plasma]
+TF_A = TF_A[,sample_IDs_TF]
+TF_B = TF_B[,sample_IDs_TF]
+
+plasma_A = reshape::melt(as.matrix(plasma_A))
+plasma_B = reshape::melt(as.matrix(plasma_B))
+TF_A = reshape::melt(as.matrix(TF_A))
+TF_B = reshape::melt(as.matrix(TF_B))
+
+plasma_long = as.data.frame(cbind(plasma_A, plasma_B$value))
+colnames(plasma_long)[3:4] = c("duplicate_A", "duplicate_B")
+plasma_long = na.omit(plasma_long)
+plasma_long$duplicate_A = log2(plasma_long$duplicate_A)
+plasma_long$duplicate_B = log2(plasma_long$duplicate_B)
+
+TF_long = as.data.frame(cbind(TF_A, TF_B$value))
+colnames(TF_long)[3:4] = c("duplicate_A", "duplicate_B")
+TF_long = na.omit(TF_long)
+TF_long$duplicate_A = log2(TF_long$duplicate_A)
+TF_long$duplicate_B = log2(TF_long$duplicate_B)
+
+a = ggplot(plasma_long, aes(x=duplicate_A, y=duplicate_B)) +
+  geom_point( color="darksalmon", alpha = 0.5) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("scatterplot duplicates plasma") +
+  theme_few()
+b = ggplot(TF_long, aes(x=duplicate_A, y=duplicate_B)) +
+  geom_point( color="yellow4", alpha = 0.5) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("scatterplot duplicates tear fluid") +
+  theme_few()
+
+ggarrange(a, b, ncol = 2, nrow = 1)
+ggsave("plots/scatterplots_duplicates.pdf", width = 11, height = 8/2, units = "in")
+
+```
+
+## Missing inspection
+
+```{r missing inspection}
+#filter plasma and TF data
+    se_plasma_filt <- filter_proteins(se_plasma, "fraction", min = 0.66)
+    se_TF_filt = filter_proteins(se_TF, "fraction", min = 0.66)
+    
+#make missing heatmap and frequency plots    
+      se_list = list(se_plasma = se_plasma, se_TF = se_TF, se_plasma_filt = se_plasma_filt, se_TF_filt = se_TF_filt)
+      freq_plots = list()
+      missing_plots = list()
+      
+      for(i in 1:length(se_list)){
+        name = names(se_list)[i]
+        missing_plots[[i]] = vis_miss(as.data.frame(assay(se_list[[i]])) ,
+                                      show_perc = TRUE, show_perc_col = TRUE, cluster = F) + ggtitle(name)
+        freq_plots[[i]] = plot_frequency(se_list[[i]]) + ggtitle(name)
+        names(freq_plots)[i] = names(missing_plots)[i] = name
+      }
+      
+      missing_plots$raw_plasma = vis_miss(plasma_data[,3:ncol(plasma_data)],
+                                      show_perc = TRUE, show_perc_col = TRUE, cluster = F) + ggtitle("plasma raw with duplicates")
+      missing_plots$raw_TF = vis_miss(TF_data[,3:ncol(TF_data)],
+                                      show_perc = TRUE, show_perc_col = TRUE, cluster = F) + ggtitle("tear fluid raw with duplicates")
+      
+      #plot all missing heatmaps
+      ggarrange(plotlist = missing_plots, ncol = 2, nrow = 3)
+      ggsave("plots/missing_heatmap_plots.jpg", width = 11, height = 8*2, units = "in")
+      #plot all frequency plots
+      ggarrange(plotlist = freq_plots, ncol = 2, nrow = 3)
+      ggsave("plots/missing_freq_plots.jpg", width = 11, height = 8*2, units = "in")
+      
+
+
+#dimensions of the data
+      dim(se_plasma)
+      dim(se_plasma_filt)
+      dim(se_TF)
+      dim(se_TF_filt)
+
+#normalization
+      se_list$se_plasma_filt_norm = normalize_vsn(se_list[["se_plasma_filt"]])
+      se_list$se_TF_filt_norm = normalize_vsn(se_list[["se_TF_filt"]])
+
+# Plot intensity distributions and cumulative fraction of proteins 
+# with and without missing values
+      detect_plots = list()
+      for(i in 1:length(se_list)){
+        name = names(se_list)[i]
+        detect_plots[[i]] = plot_detect(se_list[[i]])
+        names(detect_plots)[i] = name
+      }
+      ggarrange(plotlist = detect_plots, ncol = 2, nrow = 3, labels = names(detect_plots))
+      ggsave("plots/intensity_distribution_missing_vs_non-missing.pdf", width = 11, height = 8*2, units = "in")
+
+# Impute missing data using random draws from a 
+# Gaussian distribution centered around a minimal value (for MNAR)
+      se_list$se_TF_MinProb_imp <- impute(se_list$se_TF_filt_norm, fun = "MinProb", q = 0.01)
+      se_list$se_plasma_MinProb_imp <- impute(se_list[["se_plasma_filt_norm"]], fun = "MinProb", q = 0.01)
+
+# Impute missing data using random draws from a 
+# manually defined left-shifted Gaussian distribution (for MNAR)
+      se_list$se_TF_man_imp  <- impute(se_list[["se_TF_filt_norm"]], fun = "man", shift = 1.8, scale = 0.3)
+      se_list$se_plasma_man_imp  <- impute(se_list[["se_plasma_filt_norm"]], fun = "man", shift = 1.8, scale = 0.3)
+
+# Impute missing data using the k-nearest neighbour approach (for MAR)
+      se_list$se_TF_knn_imp  <- impute(se_list[["se_TF_filt_norm"]], fun = "knn", rowmax = 0.9)
+      se_list$se_plasma_knn_imp  <- impute(se_list[["se_plasma_filt_norm"]], fun = "knn", rowmax = 0.9)
+
+
+# Plot intensity distributions before and after imputation
+      imp_plots = list()
+      imp_plots$TF = plot_imputation(se_list$se_TF_filt_norm, se_list$se_TF_MinProb_imp, se_list$se_TF_man_imp, se_list$se_TF_knn_imp)
+      imp_plots$plasma = plot_imputation(se_list$se_plasma_filt_norm, se_list$se_plasma_MinProb_imp, se_list$se_plasma_man_imp, se_list$se_plasma_knn_imp)
+      ggarrange(plotlist = imp_plots, ncol = 2, nrow = 1, labels = names(imp_plots))
+      ggsave("plots/intensity_distribution_imputations.pdf", width = 11, height = 8, units = "in")
+
+#save all data in results      
+      for(i in 1:length(se_list)){
+        write.csv(as.data.frame(assay(se_list[[i]])), paste0("results/data_",names(se_list)[i],".csv"), row.names=TRUE)
+      }
+```
+
+## Make boxplots data
+
+```{r make boxplots data}
+#visualize every dataset, also raw
+      
+      mean_expression_plot = function(data, title){
+      plot_patient = ggplot(data = reshape2::melt(data), aes(x=Var1, y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6)) +
+        ggtitle(title)
+      
+      
+      plot_protein = ggplot(data = reshape2::melt(data), aes(x=reorder(as.factor(Var2),value), y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6))+
+        ggtitle(title)
+      
+      return(list(plot_patient = plot_patient, plot_protein = plot_protein))
+      }
+
+patient_plots = protein_plots = list()
+
+for(i in 1:length(se_list)){
+  r = mean_expression_plot(t(assay(se_list[[i]])), title = names(se_list)[i])
+  patient_plots[[i]] = r[["plot_patient"]]
+  protein_plots[[i]] = r[["plot_protein"]]
+  names(protein_plots)[i] = names(patient_plots)[i]= names(se_list)[i]
+}
+
+ggarrange(plotlist = patient_plots, nrow = 3, ncol = 4)  
+ggsave("plots/boxplots_each_patient.pdf", width = 11*4, height = 8*4, units = "in")
+
+ggarrange(plotlist = protein_plots, nrow = 12, ncol = 1)  
+ggsave("plots/boxplots_each_protein.pdf", width = 11*2, height = 8*4, units = "in")
+
+```
+
+## Venn Diagram Proteins
+
+```{r venn diagram proteins}
+library(ggVennDiagram)
+      
+
+#compare within Lenz lab data 
+      #UNIPROT
+      proteins_plasma = se_list[["se_plasma_filt_norm"]]@elementMetadata@listData[["ID"]]
+      proteins_TF = se_list[["se_TF_filt_norm"]]@elementMetadata@listData[["ID"]]
+      proteins = list(proteins_plasma = proteins_plasma, 
+                      proteins_TF = proteins_TF)
+
+      ggVennDiagram(proteins, set_color = c("darksalmon",   "yellow4")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("darksalmon",   "yellow4")) +
+        ggtitle("Uniprot")
+      
+      ggsave(file = "plots/venn_diagram_uniprot.pdf", width = 11/2, height = 8/2, units = "in")
+      
+      #GENE_SYMBOL
+      proteins_plasma_gene_symbol = se_list[["se_plasma_filt_norm"]]@NAMES
+      proteins_TF_gene_symbol = se_list[["se_TF_filt_norm"]]@NAMES
+      proteins = list(proteins_plasma = proteins_plasma_gene_symbol, 
+                      proteins_TF = proteins_TF_gene_symbol)
+
+      ggVennDiagram(proteins, set_color = c("darksalmon",   "yellow4")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("darksalmon",   "yellow4"))+
+        ggtitle("Gene Symbol")
+      
+      ggsave(file = "plots/venn_diagram_gene.pdf", width = 11/2, height = 8/2, units = "in")
+
+#venn diagram plasma from Wojciech
+      se_Wojciech = readRDS(file = "/Users/clara.meijs/Desktop/PhD/Proj_PremodiALS/Proteomics Wojciech Kuban/results/se_plasma_list.rds")
+      
+      #GENE SYMBOL
+      Wojciech = se_Wojciech$plasma_norm@NAMES
+      ggVennDiagram(list(proteins_plasma_Lenz = proteins_plasma_gene_symbol, proteins_plasma_Wojciech = Wojciech), set_color = c("darksalmon",   "orange4")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("darksalmon",   "orange4"))+
+        ggtitle("Gene Symbol")
+      
+      ggsave(file = "plots/venn_diagram_vs_Wojciech_proteins_gene.pdf", width = 11/2, height = 8/2, units = "in")
+      
+      #UNIPROT
+      Wojciech = se_Wojciech$plasma_norm@elementMetadata@listData[["ID"]]
+      ggVennDiagram(list(proteins_plasma_Lenz = proteins_plasma, proteins_plasma_Wojciech = Wojciech), set_color = c("darksalmon",   "orange4")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("darksalmon",   "orange4"))+
+        ggtitle("Uniprot")
+      
+      ggsave(file = "plots/venn_diagram_vs_Wojciech_proteins_uniprot.pdf", width = 11/2, height = 8/2, units = "in")
+      
+      
+      
+#venn diagram tear fluid proteins from Lena-sophie's project
+       TF_data_Lena_Sophie = read.table(file = '/Users/clara.meijs/Desktop/PhD/Proj_ALS_tear_fluid/Claras_code/Proteomics models/data/New_proteomics_data_expression.txt', sep = '\t', header = TRUE)
+       #select only Homo Sapiens genes (filter n=5)
+      TF_data_Lena_Sophie = TF_data_Lena_Sophie[grep("Homo sapiens", TF_data_Lena_Sophie$PG.Organisms),]
+
+#take only gene name, UniProt accession number, and quantity columns
+      TF_data_Lena_Sophie = TF_data_Lena_Sophie[,c("PG.ProteinGroups", "PG.Genes", colnames(TF_data_Lena_Sophie)[grep("PG.Quantity", colnames(TF_data_Lena_Sophie))])]
+
+#remove proteins without name
+      TF_data_Lena_Sophie = TF_data_Lena_Sophie[TF_data_Lena_Sophie$PG.Genes!="",]
+
+#select rows with duplicate A and duplicate B and check if the duplicates have the same order 
+      index_dup_A_TF_LS = grep("_A_", colnames(TF_data_Lena_Sophie))
+      index_dup_B_TF_LS = grep("_B_", colnames(TF_data_Lena_Sophie))
+#Conclusion, for plasma they are not the same order
+
+#shorten sample names
+      f = function(name){
+        a = str_split(name, pattern = "_")[[1]]
+        a = paste0(a[5], "_", a[6], "_",  a[7])
+        return(a)
+      }
+      colnames(TF_data_Lena_Sophie)[3:ncol(TF_data_Lena_Sophie)] = as.vector(sapply(colnames(TF_data_Lena_Sophie)[3:ncol(TF_data_Lena_Sophie)], function(x) f(x)))
+      
+#make NaN into NA
+      TF_data_Lena_Sophie[TF_data_Lena_Sophie == "NaN"] = NA
+      TF_data_Lena_Sophie[TF_data_Lena_Sophie == "Filtered"] = NA
+      for(i in 1:ncol(TF_data_Lena_Sophie)){TF_data_Lena_Sophie[is.nan(TF_data_Lena_Sophie[,i]),i] = NA}
+      
+
+#take first gene name or first uniprot accession number
+      f = function(name){
+        a = str_split(name, pattern = ";")[[1]]
+        return(a[1])
+      }
+      TF_data_Lena_Sophie[,"PG.ProteinGroups"] = as.vector(sapply(TF_data_Lena_Sophie[,"PG.ProteinGroups"], function(x) f(x)))
+      TF_data_Lena_Sophie[,"PG.Genes"] = as.vector(sapply(TF_data_Lena_Sophie[,"PG.Genes"], function(x) f(x)))
+      TF_data_Lena_Sophie = TF_data_Lena_Sophie[TF_data_Lena_Sophie$PG.Genes!="",]
+
+
+#make the gene names the rownames, after making them unique. 
+      rownames(TF_data_Lena_Sophie) = make.unique(TF_data_Lena_Sophie[,"PG.Genes"])
+
+#make empty matrix for merged duplicates
+      TF_merged_LS = as.data.frame(matrix(data = NA, nrow = nrow(TF_data_Lena_Sophie), ncol = length(index_dup_A_TF_LS)+2))
+      rownames(TF_merged_LS) = rownames(TF_data_Lena_Sophie)
+      sample_IDs_TF_LS = colnames(TF_data_Lena_Sophie)[index_dup_B_TF_LS]
+      sample_IDs_TF_LS = gsub("B_", "", sample_IDs_TF_LS)
+      colnames(TF_merged_LS) = c("Uniprot", "Gene_Symbol", sample_IDs_TF_LS)
+      TF_data_Lena_Sophie[, 3:ncol(TF_data_Lena_Sophie)] <- lapply(TF_data_Lena_Sophie[, 3:ncol(TF_data_Lena_Sophie)], function(x) gsub(",", ".", x))
+      TF_data_Lena_Sophie[, 3:ncol(TF_data_Lena_Sophie)] <- lapply(TF_data_Lena_Sophie[, 3:ncol(TF_data_Lena_Sophie)], as.numeric)
+
+#perform merging of duplicates
+      for(i in 1:length(sample_IDs_TF_LS)){
+        for(j in 1:nrow(TF_data_Lena_Sophie)){
+          A = TF_data_Lena_Sophie[j,grep(sample_IDs_TF_LS[i], colnames(TF_data_Lena_Sophie))[1]]
+          B = TF_data_Lena_Sophie[j,grep(sample_IDs_TF_LS[i], colnames(TF_data_Lena_Sophie))[2]]
+          mean = mean(c(A,B), na.rm = T)
+          TF_merged_LS[j, sample_IDs_TF_LS[i]] = mean
+        }}
+      
+      
+      TF_merged_LS[TF_merged_LS == "NaN"] = NA
+      TF_merged_LS[,1:2] = TF_data_Lena_Sophie[,1:2]
+
+#make summarized experiments
+#TF
+      TF_merged_LS2 = TF_merged_LS[,3:ncol(TF_merged_LS)]
+      abundance.columns <- 1:ncol(TF_merged_LS2) # get abundance column numbers
+      clin = data.frame(label = colnames(TF_merged_LS2)[1:ncol(TF_merged_LS2)],  #very limited clinical variables
+                        condition = rep("control", ncol(TF_merged_LS2)) ,
+                        replicate = 1:ncol(TF_merged_LS2))
+      
+      TF_merged_LS2$name = rownames(TF_merged_LS2)
+      TF_merged_LS2$ID = TF_merged_LS$Uniprot
+      experimental.design = clin
+      se_TF_LS <- make_se(TF_merged_LS2, abundance.columns, experimental.design)
+      
+      se_TF_LS_filt = filter_proteins(se_TF_LS, "fraction", min = 0.66)
+      
+      #GENE SYMBOL
+      Lena_Sophie = se_TF_LS_filt@NAMES
+      ggVennDiagram(list(proteins_TF_Lenz = proteins_TF_gene_symbol, proteins_TF_Lena_Sophie = Lena_Sophie), set_color = c("yellow4",   "mediumpurple2")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("yellow4",   "mediumpurple2"))+
+        ggtitle("Gene Symbol")
+      
+      ggsave(file = "plots/venn_diagram_vs_Lena_Sophie_proteins_gene.pdf", width = 11/2, height = 8/2, units = "in")
+      
+      #UNIPROT
+      Lena_Sophie = se_TF_LS_filt@elementMetadata@listData[["ID"]]
+      ggVennDiagram(list(proteins_TF_Lenz = proteins_TF, proteins_TF_Lena_Sophie = Lena_Sophie), set_color = c("yellow4",   "mediumpurple2")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("yellow4",   "mediumpurple2"))+
+        ggtitle("Uniprot")
+      
+      ggsave(file = "plots/venn_diagram_vs_Lena_Sophie_proteins_uniprot.pdf", width = 11/2, height = 8/2, units = "in")
+
+venn_diagram_results = list()            
+venn_diagram_results$uniprot_only_plasma = proteins_plasma[!proteins_plasma %in% proteins_TF]
+venn_diagram_results$uniprot_only_TF = proteins_TF[!proteins_TF %in% proteins_plasma]
+venn_diagram_results$uniprot_both_plasma_TF = proteins_TF[proteins_TF %in% proteins_plasma] 
+      
+venn_diagram_results$uniprot_only_TF_Lena_Sophie = Lena_Sophie[!Lena_Sophie %in% proteins_TF]
+venn_diagram_results$uniprot_only_TF_Lenz = proteins_TF[!proteins_TF %in% Lena_Sophie]
+venn_diagram_results$uniprot_both_TF_Lena_Sophie_Lenz = proteins_TF[proteins_TF %in% Lena_Sophie]
+
+venn_diagram_results$uniprot_only_plasma_Lenz = proteins_plasma[!proteins_plasma %in% Wojciech]
+venn_diagram_results$uniprot_only_plasma_Wojciech = Wojciech[!Wojciech %in% proteins_plasma]
+venn_diagram_results$uniprot_both_plasma_Lenz_Wojciech = Wojciech[Wojciech %in% proteins_plasma]
+
+saveRDS(venn_diagram_results, file = "results/Venn_diagram_results_in_list.rds")
+
+```
+
+## Density plot
+
+```{r Visualization 1b: Density plot}
+#figure raw
+      d = as.data.frame(assay(se_list[["se_plasma"]]))
+      d = reshape2::melt(d)
+      d$technique = rep("plasma", nrow(d))
+      
+      d2 = as.data.frame(assay(se_list[["se_TF"]]))
+      d2 = reshape2::melt(d2)
+      d2$technique = rep("TF", nrow(d2))
+      
+      d = as.data.frame(rbind(d, d2))
+
+      a = ggplot(d, aes(x=value, color=technique)) +
+        geom_density() +
+        theme_few() +
+        scale_colour_few() +
+        ggtitle("raw data") +
+        scale_color_manual(values = c("darksalmon", "yellow4"))
+
+#figure filtered      
+      
+      d = as.data.frame(assay(se_list[["se_plasma_filt"]]))
+      d = reshape2::melt(d)
+      d$technique = rep("plasma", nrow(d))
+      
+      d2 = as.data.frame(assay(se_list[["se_TF_filt"]]))
+      d2 = reshape2::melt(d2)
+      d2$technique = rep("TF", nrow(d2))
+      
+      d = as.data.frame(rbind(d, d2))
+
+      b = ggplot(d, aes(x=value, color=technique)) +
+        geom_density() +
+        theme_few() +
+        scale_colour_few() +
+        ggtitle("filtered data") +
+        scale_color_manual(values = c("darksalmon", "yellow4"))
+
+
+#figure normalized
+      
+      d = as.data.frame(assay(se_list[["se_plasma_filt_norm"]]))
+      d = reshape2::melt(d)
+      d$technique = rep("plasma", nrow(d))
+      
+      d2 = as.data.frame(assay(se_list[["se_TF_filt_norm"]]))
+      d2 = reshape2::melt(d2)
+      d2$technique = rep("TF", nrow(d2))
+      
+      d = as.data.frame(rbind(d, d2))
+
+      c = ggplot(d, aes(x=value, color=technique)) +
+        geom_density() +
+        theme_few() +
+        scale_colour_few() +
+        ggtitle("filtered & normalized data") +
+        scale_color_manual(values = c("darksalmon", "yellow4"))
+
+ggarrange(a,b,c, ncol = 3, nrow = 1)
+ggsave(file = "plots/density.pdf", width = 11*1.5, height = 3, units = "in")
+```
+
+## Heatmap
+
+```{r heatmap}
+library(Polychrome)
+library(tidyr)
+set.seed(9)
+
+#functions for saving the heatmaps as figures
+        
+        save_pheatmap_pdf <- function(x, filename, width=11/2, height=8/2) {
+           stopifnot(!missing(x))
+           stopifnot(!missing(filename))
+           pdf(filename, width=width, height=height)
+           grid::grid.newpage()
+           grid::grid.draw(x$gtable)
+           dev.off()
+        }
+        
+        make_pheatmap <- function(data, main = "Heatmap", show_rownames = T,
+                                  #labels_col, 
+                                  annotation_col, annotation_colors){
+          p = pheatmap::pheatmap(data, 
+                  name = "expression",
+                  show_colnames = T,
+                  show_rownames = show_rownames,
+                  fontsize = 4,
+                  fontsize_col = 4,
+                  fontsize_row = 2, 
+                  annotation_col = NA,
+                  annotation_colors = NA,
+                  #annotation_row = annotation_row,
+                  color = viridis::viridis(100, option="G", direction = -1,),
+                  main = main,
+                  border_color = NA,
+                  cluster_cols = F,
+                  cluster_rows = F,
+                  #labels_col = labels_col,
+                  na_col = "grey80")
+          return(p)
+        }
+        
+        f = function(name){
+          a = str_split(name, pattern = "_")[[1]][2]
+          a = substr(a, 0, nchar(a)-1)
+          return(a)
+        }
+
+# loop for all datasets and all methods 
+        
+      for(i in 1:length(se_list)){
+        title = names(se_list)[i]
+        print(title)
+        
+        se = se_list[[i]]
+        labels = se$label
+        data = assay(se)
+        colnames(data) = se$label
+        # if(grep("plasma", title)){
+        #   labels = as.vector(sapply(labels, function(x) f(x)))
+        # # Generate annotations for rows and columns
+        #   annotation_col = data.frame(sample_type = as.factor(labels))
+        #   rownames(annotation_col) = se$label
+        #   
+        #   mycolors = glasbey.colors(length(unique(annotation_col$sample_type)))
+        #   mycolors[1] = "yellow4"
+        #   names(mycolors) <- unique(annotation_col$sample_type)
+        #   annotation_colors <- list(sample_type = list(mycolors)[[1]])
+        # }else{
+        #   annotation_col = NA
+        #   mycolors = NA
+        # }
+        
+#create heatmaps with all patients
+
+        #without grouping, all proteins
+        p = make_pheatmap(data = data, 
+                          main = paste0("Heatmap all proteins\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        # without grouping, 100 most variable proteins
+        d = data 
+        d2 = head(order(rowVars(d),decreasing = T),100)
+        p = make_pheatmap(data = d[d2,], 
+                          main = paste0("Heatmap 100 most variable proteins\n",title, "\nnot clustered"))
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_mostvar_",title,".pdf"))
+        }
+        
+#heatmap with relative variance
+        
+        hist(pivot_longer(TF_relative_diff, cols = 1:ncol(TF_relative_diff))$value)
+        
+        title = "relative_difference_duplicates"
+        
+        TF_relative_diff[TF_relative_diff > 300] = 300
+        TF_relative_diff[TF_relative_diff == 0] = NA
+        
+        plasma_relative_diff[plasma_relative_diff > 300] = 300
+        plasma_relative_diff[plasma_relative_diff == 0] = NA
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = TF_relative_diff,  
+                          main = paste0("Heatmap all proteins TF\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_TF_",title,".pdf"))
+        
+        p = make_pheatmap(data = plasma_relative_diff,  
+                          main = paste0("Heatmap all proteins plasma\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_plasma_",title,".pdf"))
+        
+        title = "difference_duplicates"
+        
+        TF_difference[TF_difference > 300] = 300
+        TF_difference[TF_difference == 0] = NA
+        
+        plasma_difference[plasma_difference > 300] = 300
+        plasma_difference[plasma_difference == 0] = NA
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = TF_difference[,3:ncol(TF_difference)],  
+                          main = paste0("Heatmap all proteins TF\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_TF_",title,".pdf"))
+        
+        p = make_pheatmap(data = plasma_difference[,3:ncol(TF_difference)],  
+                          main = paste0("Heatmap all proteins plasma\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_plasma_",title,".pdf"))
+        
+#create heatmap of data before merging triplicates
+        
+        title = "raw_before_merging_duplicates" 
+        
+        #remove ridiculously high values
+        plasma_data2 = log2(plasma_data[,3:ncol(plasma_data)])
+        TF_data2 = log2(TF_data[,3:ncol(TF_data)])
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = TF_data2,  
+                          main = paste0("Heatmap all proteins TF\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_TF_",title,".pdf"))
+        
+        p = make_pheatmap(data = plasma_data2,  
+                          main = paste0("Heatmap all proteins plasma\n",title, "\n not clustered"),  
+                          show_rownames = F)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_plasma_",title,".pdf"))
+
+```
+
+## UMAP
+
+```{r UMAP}
+# # set seed for reproducible results
+set.seed(9)
+group = c("darksalmon", "yellow4")
+
+
+UMAP_density_plot = function(data,
+                             ggtitle = "UMAP with disease status labels",
+                             legend_name = "Disease status",
+                             labels = clin$Condition,
+                             file_location = "plots/UMAP_condition.pdf",
+                             file_location_labels = "plots/UMAP_condition_labels.pdf",
+                             colour_set = c("seagreen4", "slateblue1", "salmon")){
+      # run umap function
+      umap_out = umap::umap(data)
+      umap_plot = as.data.frame(umap_out$layout)
+
+      #add condition labels
+      umap_plot$group = labels
+
+      # plot umap
+      p1 = ggplot(umap_plot) + geom_point(aes(x=V1, y=V2, color = as.factor(group)), alpha = 0.5) +
+        ggtitle(ggtitle) +
+          theme_few() +
+          scale_colour_few() +
+          scale_color_manual(name = legend_name,
+                           labels = levels(as.factor(umap_plot$group)),
+                           values = colour_set)
+
+      xdens <-
+        axis_canvas(p1, axis = "x") +
+        geom_density(data = umap_plot, aes(x = V1, fill = group, colour = group), alpha = 0.3) +
+        scale_fill_manual( values = colour_set) +
+        scale_colour_manual( values = colour_set)
+      ydens <-
+        axis_canvas(p1, axis = "y", coord_flip = TRUE) +
+        geom_density(data = umap_plot, aes(x = V2, fill = group, colour = group), alpha = 0.3) +
+        coord_flip() +
+        scale_fill_manual(values = colour_set) +
+        scale_colour_manual( values = colour_set)
+      p1 %>%
+        insert_xaxis_grob(xdens, grid::unit(1, "in"), position = "top") %>%
+        insert_yaxis_grob(ydens, grid::unit(1, "in"), position = "right") %>%
+        ggdraw()
+
+      p1
+      # save umap
+      ggsave(file_location, width = 11/2, height = 8/2, units = "in")
+
+      p1 + geom_text(label = rownames(umap_plot), x = umap_plot$V1, y = umap_plot$V2,
+                     hjust = 0, nudge_x = 1, size = 1.5, colour = "grey")
+
+      # save umap with labels
+      ggsave(file_location_labels, width = 11/2, height = 8/2, units = "in")
+}
+
+  d1 = t(assay(se_list[["se_plasma_MinProb_imp"]]))
+  d2 = t(assay(se_list[["se_TF_MinProb_imp"]]))
+  
+  proteins_in_both_fluids = colnames(d1)[colnames(d1) %in% colnames(d2)]
+  
+  d1 = d1[,proteins_in_both_fluids]
+  d2 = d2[,proteins_in_both_fluids]
+
+  d = as.data.frame(rbind(d1,d2))
+  
+  labels_group = c(rep("plasma", nrow(d1)), rep("TF", nrow(d2)))
+  title = "plasma_vs_TF"
+
+#perform plots with function
+        UMAP_density_plot(data = d,
+                          ggtitle = paste0("UMAP with fluid labels\n", title),
+                          legend_name = "Fluid labels",
+                          labels = labels_group,
+                          file_location = paste0("plots/UMAP_fluid_group_",title,".pdf"),
+                          file_location_labels = paste0("plots/UMAP_fluid_group_labels_",title,".pdf"),
+                          colour_set = group)
+```
+
+## ORA with clusterprofiler package, and only Perseus results
+
+```{r Visualization 5c: ORA with clusterprofiler package, and only Perseus results}
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+library(msigdbr)
+library(dichromat)
+library(stringr)
+redblue<-colorRampPalette(c("red","blue"))
+
+clusterprofiler_ORA = function(data, universe, ont, title, alpha = 0.05){ #input: named vector with log fold change
+
+    # FUNCTIONS WITHIN FUNCTION
+
+    f_enrich = function(){
+      cutoff = enrichGO(gene = data,
+                      universe = universe,
+                      OrgDb = 'org.Hs.eg.db',
+                      keyType = 'UNIPROT',
+                      readable = T,
+                      ont = ont,
+                      pvalueCutoff = alpha,
+                      qvalueCutoff = alpha)
+
+      return(cutoff)
+    }
+
+    f_enrichplot = function(result){
+      barplot = ggplot(data=result,
+            aes(x=reorder(Description, minlogFDR), y=minlogFDR, fill = "red")) +
+            geom_bar(stat="identity") +
+            coord_flip() +
+            theme(panel.grid.major = element_blank(),
+                  panel.grid.minor = element_blank(),
+                  #axis.title.x=element_blank(),
+                  axis.title.y=element_blank(),
+                  panel.background = element_blank(),
+                  text = element_text(size = 13, family="sans"),
+                  axis.line = element_line(colour = "black")) +
+                  labs(
+                      title=paste0(title, "\nFDR cut-off of ", alpha),
+                       y ="-log10(FDR)") +
+            geom_text(aes(label = result$GeneRatio), colour="white",
+                      position = position_stack(vjust = 0.5)) +
+            scale_x_discrete(labels = function(x) str_wrap(x, width = 40)) +
+            ylim(0, max(c(-log10(alpha), max(result$minlogFDR)))) +
+            geom_hline(yintercept = -log10(alpha))
+
+      return(barplot)
+    }
+
+    #END OF FUNCTIONS WITHIN FUNCTION
+
+    #HERE COMES THE ANALYSIS
+        res_cutoff = f_enrich()
+        if(nrow(res_cutoff@result[res_cutoff@result$pvalue<=alpha,])>30){
+          res_cutoff = clusterProfiler::simplify(res_cutoff)
+        }
+        result = res_cutoff@result
+        result = result[result$p.adjust<=alpha,]
+        if(nrow(result)>30){result = result[1:30,]}
+        if(nrow(result)<1){result = "no significant results"}
+
+        #change description into factor and take -log of p-adjust
+        if(!is.character(result)){
+          result$Description <- as.factor(result$Description)
+          result$minlogFDR = -log10(result$p.adjust)
+          #plot figure individually
+          plot = f_enrichplot(result)
+          #cnetplot
+          cnetplot_labels = cnetplot(res_cutoff, node_label = 'all', showCategory = 1500)  +
+              ggtitle(paste0("ORA gene ontology with \n",title))
+          cnetplot_nolabels = cnetplot(res_cutoff, node_label = 'none', showCategory = 1500)  +
+              ggtitle(paste0("ORA gene ontology with \n",title))
+          #goplot
+          if(nrow(result)<2){
+            goplot = "only one results"
+          }else{
+            goplot = goplot(res_cutoff) +
+              ggtitle(paste0("ORA gene ontology with \n",title))
+          }
+          #emapplot
+          res_cutoff2 <- pairwise_termsim(res_cutoff)
+          emapplot = emapplot(res_cutoff2, cex.params = list(category_label = 0.75), showCategory = 30) +
+              ggtitle(paste0("ORA gene ontology with \n",title))
+        }else{
+          plot = "no_significant_result"
+          cnetplot_labels = cnetplot_nolabels = goplot = emapplot = plot
+        }
+
+        results = list(pathways = result,
+                          barplot = plot,
+                          cnetplot_labels = cnetplot_labels,
+                          cnetplot_nolabels = cnetplot_nolabels, 
+                          goplot = goplot,
+                          emapplot = emapplot)
+      return(results)
+}
+
+
+##### PERFORMING THE GSEA WITH THE FUNCTION ABOVE ON PERSEUS RESULTS
+      
+      #the ontologies to test:
+      ontologies = c("BP", "CC", "MF")
+      res = list()
+      l = 1
+      alpha = 0.05
+      
+      plasma_universe = unique(c(venn_diagram_results$uniprot_only_plasma_Lenz, 
+                                 venn_diagram_results$uniprot_only_plasma_Wojciech, 
+                                 venn_diagram_results$uniprot_both_plasma_Lenz_Wojciech))
+      TF_universe = unique(c(venn_diagram_results$uniprot_only_TF_Lena_Sophie, 
+                                 venn_diagram_results$uniprot_only_TF_Lenz, 
+                                 venn_diagram_results$uniprot_both_TF_Lena_Sophie_Lenz))
+      plasma_and_TF_universe = unique(c(plasma_universe, TF_universe))
+      
+      universes = list(plasma_and_TF_universe, plasma_and_TF_universe, plasma_and_TF_universe, 
+                       TF_universe, TF_universe, TF_universe,
+                       plasma_universe, plasma_universe, plasma_universe)
+      
+      for(i in 1:length(venn_diagram_results)){
+        for(j in 1:length(ontologies)){
+          title = paste0("GO_",ontologies[j], "_", names(venn_diagram_results)[i])
+          print(title)
+          r = clusterprofiler_ORA(data = venn_diagram_results[[i]], 
+                              universe = universes[[i]], 
+                              ont = ontologies[j], 
+                              alpha = alpha, 
+                              title = title)
+          res[[l]] = r
+          names(res)[l] = title
+          l = l+1
+          if(!is.character(r$pathways)){
+            a = r$barplot
+            b = r$emapplot
+            ggarrange(a, b, ncol = 2)
+            ggsave(filename = paste0("plots/ORA_", title, ".pdf"), 
+                   width = 11*1.5, 
+                   height = max(c(5, 0.35*(nrow(r$pathways)+3))), 
+                   units = "in")
+          }else{
+            print(paste0(title, " has no significant results"))
+          }
+        }
+      }
+      
+#redo the TF ones with alpha 0.1
+      alpha = 0.1
+      for(i in grep("TF_", names(venn_diagram_results))){
+        for(j in 1:length(ontologies)){
+          title = paste0("GO_",ontologies[j], "_", names(venn_diagram_results)[i], "_FDR0.1")
+          print(title)
+          r = clusterprofiler_ORA(data = venn_diagram_results[[i]], 
+                              universe = universes[[i]], 
+                              ont = ontologies[j], 
+                              alpha = alpha, 
+                              title = title)
+          res[[l]] = r
+          names(res)[l] = title
+          l = l+1
+          if(!is.character(r$pathways)){
+            a = r$barplot
+            b = r$emapplot
+            ggarrange(a, b, ncol = 2)
+            ggsave(filename = paste0("plots/ORA_", title, ".pdf"), 
+                   width = 11*1.5, 
+                   height = max(c(5, 0.35*(nrow(r$pathways)+3))), 
+                   units = "in")
+          }else{
+            print(paste0(title, " has no significant results"))
+          }
+        }
+      }
+
+
+
+```
+
+## Save the universes and the venn diagram lists in one excel file
+
+
+```{r save the universes and the venn diagram lists in one excel file}
+library(openxlsx)
+
+universes = list(plasma_universe = plasma_universe,
+                 TF_universe = TF_universe,
+                 plasma_and_TF_universe = plasma_and_TF_universe)
+venn_diagram_data = c(venn_diagram_results, universes)
+names(venn_diagram_data)[names(venn_diagram_data) == "uniprot_both_TF_Lena_Sophie_Lenz"] = "unipr_both_TF_Lena_Sophie_Lenz"
+names(venn_diagram_data)[names(venn_diagram_data) == "uniprot_both_plasma_Lenz_Wojciech"] = "unipr_both_plasma_Lenz_Wojciech"
+
+# Create a new Excel workbook
+workbook <- createWorkbook()
+
+# Iterate through the list and add each element as a separate sheet
+for (sheet_name in names(venn_diagram_data)) {
+  addWorksheet(workbook, sheet_name)
+  writeData(workbook, sheet = sheet_name, venn_diagram_data[[sheet_name]], startCol = 1, startRow = 1)
+}
+
+# Save the workbook
+saveWorkbook(workbook, "results/venn_diagram_data.xlsx", overwrite = TRUE)
+
+```
+
+## ORA with no background
+
+```{r ORA with no background}
+##### PERFORMING THE GSEA WITH THE FUNCTION ABOVE ON PERSEUS RESULTS
+      
+      #the ontologies to test:
+      ontologies = c("BP", "CC", "MF")
+      res = list()
+      l = 1
+      alpha = 0.05
+      
+      venn_diagram_results$all_proteins_plasma = proteins_plasma
+      venn_diagram_results$all_proteins_TF = proteins_TF
+      venn_diagram_results$all_proteins_Lena_Sophie = Lena_Sophie
+      venn_diagram_results$all_proteins_Wojciech = Wojciech
+      
+      for(i in 1:length(venn_diagram_results)){
+        for(j in 1:length(ontologies)){
+          title = paste0("No_Background_GO_",ontologies[j], "_", names(venn_diagram_results)[i])
+          print(title)
+          r = clusterprofiler_ORA(data = venn_diagram_results[[i]], 
+                              universe = NA, 
+                              ont = ontologies[j], 
+                              alpha = alpha, 
+                              title = title)
+          res[[l]] = r
+          names(res)[l] = title
+          l = l+1
+          if(!is.character(r$pathways)){
+            a = r$barplot
+            b = r$emapplot
+            ggarrange(a, b, ncol = 2)
+            ggsave(filename = paste0("plots/ORA_", title, ".pdf"), 
+                   width = 11*1.5, 
+                   height = max(c(5, 0.35*(nrow(r$pathways)+3))), 
+                   units = "in")
+          }else{
+            print(paste0(title, " has no significant results"))
+          }
+        }
+      }
+```
+
+## Density plots venn diagrams
+
+```{r density plots venn diagrams}
+rowmeans = list()
+
+#plasma and TF from Christof Lenz
+      df_plasma = as.data.frame(assay(se_list$se_plasma_filt_norm))
+      rownames(df_plasma) = se_list$se_plasma_filt_norm@elementMetadata@listData[["ID"]]
+      rowmeans$plasma = rowMeans(df_plasma, na.rm = T)
+      df_plasma$overlap = rownames(df_plasma) %in% venn_diagram_results$uniprot_both_plasma_TF
+      df_plasma$overlap <- factor(df_plasma$overlap, levels = c(FALSE, TRUE), labels = c("plasma_only_in_plasma", "plasma_also_in_TF"))
+      df_plasma <- df_plasma %>% rownames_to_column(var = "Proteins")
+      df_plasma_long <- pivot_longer(df_plasma, cols = starts_with("control"), names_to = "Variable")
+      
+      df_TF = as.data.frame(assay(se_list$se_TF_filt_norm))
+      rownames(df_TF) = se_list$se_TF_filt_norm@elementMetadata@listData[["ID"]]
+      rowmeans$TF = rowMeans(df_TF, na.rm = T)
+      df_TF$overlap = rownames(df_TF) %in% venn_diagram_results$uniprot_both_plasma_TF
+      df_TF$overlap <- factor(df_TF$overlap, levels = c(FALSE, TRUE), labels = c("TF_only_in_TF", "TF_also_in_plasma"))
+      df_TF <- df_TF %>% rownames_to_column(var = "Proteins")
+      df_TF_long <- pivot_longer(df_TF, cols = starts_with("control"), names_to = "Variable")
+      
+      plasma_TF_long = as.data.frame(rbind(df_TF_long, df_plasma_long))
+      
+      # Create a density plot with facets
+      a = ggplot(plasma_TF_long, aes(x = value, fill = overlap)) +
+        geom_density(alpha = 0.5) +
+        labs(title = "Density Plot: Plasma vs TF",
+             x = "Value",
+             y = "Density") +
+        theme_few()
+
+#plasma from Lenz and plasma from Wojciech
+      df_Wojciech = as.data.frame(assay(se_Wojciech$plasma_norm))
+      rownames(df_Wojciech) = se_Wojciech$plasma_norm@elementMetadata@listData[["ID"]]
+      rowmeans$Wojciech = rowMeans(df_Wojciech, na.rm = T)
+      df_Wojciech$overlap = rownames(df_Wojciech) %in% venn_diagram_results$all_proteins_plasma
+      df_Wojciech$overlap <- factor(df_Wojciech$overlap, levels = c(FALSE, TRUE), labels = c("Wojciech_only_in_Wojciech", "Wojciech_also_in_Lenz"))
+      df_Wojciech <- df_Wojciech %>% rownames_to_column(var = "Proteins")
+      df_Wojciech_long <- pivot_longer(df_Wojciech, cols = starts_with("control"), names_to = "Variable")
+      
+      
+      df_plasma = as.data.frame(assay(se_list$se_plasma_filt_norm))
+      rownames(df_plasma) = se_list$se_plasma_filt_norm@elementMetadata@listData[["ID"]]
+      df_plasma$overlap = rownames(df_plasma) %in% venn_diagram_results$all_proteins_Wojciech
+      df_plasma$overlap <- factor(df_plasma$overlap, levels = c(FALSE, TRUE), labels = c("Lenz_only_in_Lenz", "Lenz_also_in_Wojciech"))
+      df_plasma <- df_plasma %>% rownames_to_column(var = "Proteins")
+      df_plasma_long <- pivot_longer(df_plasma, cols = starts_with("control"), names_to = "Variable")
+      
+      Wojciech_Lenz_long = as.data.frame(rbind(df_Wojciech_long, df_plasma_long))
+
+      # Create a density plot with facets
+      b = ggplot(Wojciech_Lenz_long, aes(x = value, fill = overlap)) +
+        geom_density(alpha = 0.5) +
+        labs(title = "Density Plot: Plasma Lenz vs Plasma Wojciech",
+             x = "Value",
+             y = "Density") +
+        theme_few()
+      
+#TF from Lenz and TF from Lena_Sophie
+      se_TF_LS_norm= normalize_vsn(se_TF_LS_filt)
+      df_Lena_Sophie = as.data.frame(assay(se_TF_LS_norm))
+      rownames(df_Lena_Sophie) = se_TF_LS_norm@elementMetadata@listData[["ID"]]
+      rowmeans$Lena_Sophie = rowMeans(df_Lena_Sophie, na.rm = T)
+      df_Lena_Sophie$overlap = rownames(df_Lena_Sophie) %in% venn_diagram_results$all_proteins_TF
+      df_Lena_Sophie$overlap <- factor(df_Lena_Sophie$overlap, levels = c(FALSE, TRUE), labels = c("Lena_Sophie_only_in_Lena_Sophie", "Lena_Sophie_also_in_Lenz"))
+      df_Lena_Sophie <- df_Lena_Sophie %>% rownames_to_column(var = "Proteins")
+      df_Lena_Sophie_long <- pivot_longer(df_Lena_Sophie, cols = starts_with("control"), names_to = "Variable")
+      
+      
+      df_TF = as.data.frame(assay(se_list$se_TF_filt_norm))
+      rownames(df_TF) = se_list$se_TF_filt_norm@elementMetadata@listData[["ID"]]
+      df_TF$overlap = rownames(df_TF) %in% venn_diagram_results$all_proteins_Lena_Sophie
+      df_TF$overlap <- factor(df_TF$overlap, levels = c(FALSE, TRUE), labels = c("Lenz_only_in_Lenz", "Lenz_also_in_Lena_Sophie"))
+      df_TF <- df_TF %>% rownames_to_column(var = "Proteins")
+      df_TF_long <- pivot_longer(df_TF, cols = starts_with("control"), names_to = "Variable")
+      
+      Lena_Sophie_Lenz_long = as.data.frame(rbind(df_Lena_Sophie_long, df_TF_long))
+
+      # Create a density plot with facets
+      c = ggplot(Lena_Sophie_Lenz_long, aes(x = value, fill = overlap)) +
+        geom_density(alpha = 0.5) +
+        labs(title = "Density Plot: TF Lenz vs TF Lena Sophie",
+             x = "Value",
+             y = "Density") +
+        theme_few()
+      
+# RAW plasma from Lenz and plasma from Wojciech
+      df_Wojciech = as.data.frame(assay(se_Wojciech$plasma_raw))
+      rownames(df_Wojciech) = se_Wojciech$plasma_raw@elementMetadata@listData[["ID"]]
+      rowmeans$Wojciech_raw = rowMeans(df_Wojciech, na.rm = T)
+      df_Wojciech$overlap = rownames(df_Wojciech) %in% venn_diagram_results$all_proteins_plasma
+      df_Wojciech$overlap <- factor(df_Wojciech$overlap, levels = c(FALSE, TRUE), labels = c("Wojciech_only_in_Wojciech", "Wojciech_also_in_Lenz"))
+      df_Wojciech <- df_Wojciech %>% rownames_to_column(var = "Proteins")
+      df_Wojciech_long <- pivot_longer(df_Wojciech, cols = starts_with("control"), names_to = "Variable")
+      
+      
+      df_plasma = as.data.frame(assay(se_list$se_plasma))
+      rownames(df_plasma) = se_list$se_plasma@elementMetadata@listData[["ID"]]
+      rowmeans$plasma_raw = rowMeans(df_plasma, na.rm = T)
+      df_plasma$overlap = rownames(df_plasma) %in% venn_diagram_results$all_proteins_Wojciech
+      df_plasma$overlap <- factor(df_plasma$overlap, levels = c(FALSE, TRUE), labels = c("Lenz_only_in_Lenz", "Lenz_also_in_Wojciech"))
+      df_plasma <- df_plasma %>% rownames_to_column(var = "Proteins")
+      df_plasma_long <- pivot_longer(df_plasma, cols = starts_with("control"), names_to = "Variable")
+      
+      Wojciech_Lenz_raw_long = as.data.frame(rbind(df_Wojciech_long, df_plasma_long))
+      Wojciech_Lenz_raw_long$overlap = factor(Wojciech_Lenz_raw_long$overlap, levels = c("Wojciech_only_in_Wojciech",
+                                                       "Wojciech_also_in_Lenz", 
+                                                       "Lenz_only_in_Lenz", 
+                                                       "Lenz_also_in_Wojciech"))
+
+      # Create a density plot with facets
+      d = ggplot(Wojciech_Lenz_raw_long, aes(x = value, fill = overlap)) +
+        geom_density(alpha = 0.5) +
+        labs(title = "Density Plot: RAW Plasma Lenz vs RAW Plasma Wojciech",
+             x = "Value",
+             y = "Density") +
+        theme_few()
+      
+ggarrange(a, b, c, d, ncol = 2, nrow  = 2)
+ggsave(filename = "plots/Density_venn_diagrams.pdf", 
+                   width = 11*1.5, 
+                   height = 8, 
+                   units = "in")
+
+
+# EXTRA RAW plasma from Lenz and plasma from Wojciech
+
+rownames(plasma_merged) = plasma_merged$Uniprot
+plasma_merged = plasma_merged[,3:ncol(plasma_merged)]
+rowmeans$plasma_extra_raw = rowMeans(plasma_merged)
+
+Wojciech_raw = read_csv(file = "/Users/clara.meijs/Desktop/PhD/Proj_PremodiALS/Proteomics Wojciech Kuban/results/plasma_raw_data.csv")
+rownames(Wojciech_raw) = Wojciech_raw$ID
+Wojciech_raw = Wojciech_raw[,grep("plasma", colnames(Wojciech_raw))]
+rowmeans$Wojciech_extra_raw = rowMeans(Wojciech_raw)
+Wojciech_raw$overlap = rownames(Wojciech_raw) %in% rownames(plasma_merged)
+Wojciech_raw$overlap <- factor(Wojciech_raw$overlap, levels = c(FALSE, TRUE), labels = c("Wojciech_only_in_Wojciech", "Wojciech_also_in_Lenz"))
+Wojciech_raw <- Wojciech_raw %>% rownames_to_column(var = "Proteins")
+Wojciech_raw_long <- pivot_longer(Wojciech_raw, cols = starts_with("plasma"), names_to = "Variable")
+
+plasma_merged$overlap = rownames(plasma_merged) %in% rownames(Wojciech_raw)
+plasma_merged$overlap <- factor(plasma_merged$overlap, levels = c(FALSE, TRUE), labels = c("Lenz_only_in_Lenz", "Lenz_also_in_Wojciech"))
+plasma_merged <- plasma_merged %>% rownames_to_column(var = "Proteins")
+plasma_merged_long <- pivot_longer(plasma_merged, cols = 2:81, names_to = "Variable")
+
+      Wojciech_Lenz_extra_raw_long = as.data.frame(rbind(Wojciech_raw_long, plasma_merged_long))
+      Wojciech_Lenz_extra_raw_long$value = log2(Wojciech_Lenz_extra_raw_long$value)
+
+      # Create a density plot with facets
+      d = ggplot(Wojciech_Lenz_extra_raw_long, aes(x = value, fill = overlap)) +
+        geom_density(alpha = 0.5) +
+        labs(title = "Density Plot: RAW Plasma Lenz vs RAW Plasma Wojciech",
+             x = "Value (log2 transformed)",
+             y = "Density") +
+        theme_few()
+      
+ggarrange(a, b, c, d, ncol = 2, nrow  = 2)
+ggsave(filename = "plots/Density_venn_diagrams.pdf", 
+                   width = 11*1.5, 
+                   height = 8, 
+                   units = "in")
+
+
+
+```
+
+## Scatterplots of the overlapping proteins from the venn diagrams
+
+```{r scatterplots of the overlapping proteins from the venn diagrams}
+
+#scatterplot plasma-TF
+plasma_TF = as.data.frame(cbind(
+  plasma = rowmeans$plasma[venn_diagram_results$uniprot_both_plasma_TF],
+  TF = rowmeans$TF[venn_diagram_results$uniprot_both_plasma_TF])
+  )
+
+a = ggplot(plasma_TF, aes(x = TF, y = plasma)) +
+  geom_point(color = "lightblue3", alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  labs(title = "Scatterplot plasma vs TF (both from Christof Lenz lab)",
+       x = "Tear Fluid means",
+       y = "Plasma means") +
+  theme_few()
+
+#scatterplot plasma Lenz_Wojciech
+Lenz_Wojciech = as.data.frame(cbind(
+  plasma_Lenz = rowmeans$plasma[venn_diagram_results$uniprot_both_plasma_Lenz_Wojciech],
+  plasma_Wojciech = rowmeans$Wojciech[venn_diagram_results$uniprot_both_plasma_Lenz_Wojciech])
+  )
+
+b = ggplot(Lenz_Wojciech, aes(x = plasma_Lenz, y = plasma_Wojciech)) +
+  geom_point(color = "lightblue3", alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  labs(title = "Scatterplot plasma Wojciech vs plasma Lenz",
+       x = "Plasma Lenz lab, means",
+       y = "Plasma Wojiech lab, means") +
+  theme_few()
+
+#scatterplot TF Lenz_Lena_Sophie
+Lenz_Lena_Sophie = as.data.frame(cbind(
+  TF_Lenz = rowmeans$TF[venn_diagram_results$uniprot_both_TF_Lena_Sophie_Lenz],
+  TF_Lena_Sophie= rowmeans$Lena_Sophie[venn_diagram_results$uniprot_both_TF_Lena_Sophie_Lenz])
+  )
+
+c = ggplot(Lenz_Lena_Sophie, aes(x = TF_Lenz, y = TF_Lena_Sophie)) +
+  geom_point(color = "lightblue3", alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  labs(title = "Scatterplot TF Lenz lab vs TF Lena Sophie project (which is also Lenz lab)",
+       x = "TF Lenz lab, means",
+       y = "TF Lena Sophie, means") +
+  theme_few()
+
+#scatterplot plasma Lenz_Wojciech
+Lenz_Wojciech = as.data.frame(cbind(
+  plasma_Lenz = rowmeans$plasma_raw[venn_diagram_results$uniprot_both_plasma_Lenz_Wojciech],
+  plasma_Wojciech = rowmeans$Wojciech_raw[venn_diagram_results$uniprot_both_plasma_Lenz_Wojciech])
+  )
+
+d = ggplot(Lenz_Wojciech, aes(x = plasma_Lenz, y = plasma_Wojciech)) +
+  geom_point(color = "lightblue3", alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "grey") +
+  labs(title = "Scatterplot RAW plasma Wojciech vs RAW plasma Lenz",
+       x = "Plasma Lenz lab, means",
+       y = "Plasma Wojiech lab, means") +
+  theme_few()
+
+ggarrange(a, b, c, d, ncol = 2, nrow  = 2)
+ggsave(filename = "plots/Scatterplot_venn_diagrams.pdf", 
+                   width = 11*1.5, 
+                   height = 8, 
+                   units = "in")
+```
+
+## Venn diagrams with super raw protein lists
+
+```{r Venn diagrams with super raw protein lists}
+Lenz_plasma_rawest = read.table(file = 'data/2023_37b_L_Tzeplaeff_PlasmaTable_NonNormalized_NonImputed.txt', sep = '\t', header = TRUE)
+Lenz_plasma_rawest = Lenz_plasma_rawest$PG.ProteinGroups
+Lenz_TF_rawest = read.table(file = 'data/L_Tzeplaeff_TearFluidTable_NonNormalized_NonImputed.txt', sep = '\t', header = TRUE)
+Lenz_TF_rawest = Lenz_TF_rawest$PG.ProteinGroups
+  
+Wojciech_rawest = read_tsv("/Users/clara.meijs/Desktop/PhD/Proj_PremodiALS/Proteomics Wojciech Kuban/data/plasma_report.pg_matrix.tsv")
+Wojciech_rawest = Wojciech_rawest$Protein.Group
+  
+Lena_Sophie_rawest =  read.delim("/Users/clara.meijs/Desktop/PhD/Proj_ALS_tear_fluid/Claras_code/Proteomics models/data/New_proteomics_data_expression.txt")
+Lena_Sophie_rawest = Lena_Sophie_rawest$PG.ProteinGroups
+
+#take only the protein group before the ;
+Lenz_plasma_rawest = sapply(Lenz_plasma_rawest, function(x) str_split(x, pattern = ";")[[1]][1])
+Lenz_TF_rawest = sapply(Lenz_TF_rawest, function(x) str_split(x, pattern = ";")[[1]][1])
+Wojciech_rawest = sapply(Wojciech_rawest, function(x) str_split(x, pattern = ";")[[1]][1])
+Lena_Sophie_rawest = sapply(Lena_Sophie_rawest, function(x) str_split(x, pattern = ";")[[1]][1])
+
+rawest_list = list(Lenz_plasma = Lenz_plasma_rawest,
+                   Lenz_TF = Lenz_TF_rawest,
+                   Wojciech_plasma = Wojciech_rawest,
+                   Lena_Sophie_TF = Lena_Sophie_rawest)
+
+a = ggVennDiagram(rawest_list[grep("Lenz", names(rawest_list))], set_color = c("darksalmon",   "yellow4")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c("darksalmon",   "yellow4")) +
+        ggtitle("Plasma vs TF from Lenz, most raw data form")
+
+b = ggVennDiagram(rawest_list[grep("plasma", names(rawest_list))], set_color = c( "darksalmon", "orange4")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c( "darksalmon", "orange4")) +
+        ggtitle("Plasma Lenz vs plasma Wojciech, most raw data form")
+
+c = ggVennDiagram(rawest_list[grep("TF", names(rawest_list))], set_color = c( "yellow4", "mediumpurple2")) + 
+        scale_fill_gradient(low = "white", high = "white") + 
+          scale_color_manual(values = c( "yellow4", "mediumpurple2")) +
+        ggtitle("TF Lenz vs TF Lena_Sophie project, most raw data form")
+
+ggarrange(a, b, c, ncol = 1, nrow = 3)
+ggsave(file = "plots/venn_diagram_ONLYRAW.pdf", width = 11/2, height = 8, units = "in")
+
+
+```
+
+## Sessioninfo
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+

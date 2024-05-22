@@ -1,0 +1,796 @@
+---
+title: "Proteomics Premodials"
+author: "Clara Meijs"
+date: "2023-11-27"
+output:
+  html_document:
+    df_print: paged
+    keep_md: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 5
+    theme: lumen
+---
+
+## Libraries
+
+```{r libraries}
+rm(list=ls())
+
+ library(pheatmap)
+ library(ggplot2)
+# library(matrixStats)
+# library(wesanderson)
+# library(clusterProfiler)
+# library(enrichplot)
+# library(msigdbr)
+ library(dichromat)
+# library(stringr)
+ library(dplyr)
+ library(ggrepel)
+ library(reshape2)
+ library(umap)
+ library(ggthemes)
+ library(cowplot)
+#library(MetaboAnalystR)
+library(vsn)
+library(DEP)
+library(readr)
+library(naniar)
+library(SummarizedExperiment)
+library(data.table)
+library(readxl)
+library(ggpubr)
+
+
+```
+
+## Set working directories
+
+```{r set-working-directories, message=FALSE, class.source = 'fold-hide'}
+# if you are using Rstudio run the following command, otherwise, set the working directory to the folder where this script is in
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# create directory for results
+dir.create(file.path(getwd(),'results'), showWarnings = FALSE)
+# create directory for plots
+dir.create(file.path(getwd(),'plots'), showWarnings = FALSE)
+```
+
+## Load data
+
+```{r load data}
+#load the serum dataset
+serum = read_tsv("data/report.pg_matrix.tsv") 
+
+#load the plasma dataset
+plasma = read_tsv("data/plasma_report.pg_matrix.tsv")
+
+#take redundant information out of the colnames
+colnames(serum) = gsub("D:\\\\Przemek\\\\Kuban\\\\2023_10_06\\\\whole samples\\\\sp3\\\\sp3_90min\\\\", "sp3_", colnames(serum))
+colnames(serum) = gsub("D:\\\\Przemek\\\\Kuban\\\\2023_10_06\\\\whole samples\\\\SPE\\\\SPE_90min\\\\", "SPE_", colnames(serum))
+colnames(plasma) = gsub("D:\\\\Przemek\\\\Kuban\\\\Kuban_plazma\\\\plazma", "plasma", colnames(plasma))
+
+#write duplicates as A and B
+for(i in 1:8){
+  name = paste0("serum_", i)
+  names = colnames(serum)[grep(name, colnames(serum))]
+  names = c(paste0("sp3_", name, "_A"), 
+    paste0("sp3_", name, "_B"),
+    paste0("SPE_", name, "_A"),
+    paste0("SPE_", name, "_B"))
+  colnames(serum)[grep(name, colnames(serum))] = names
+}
+
+#there is one gene name missing and we replace it with the protein name
+serum$Genes[is.na(serum$Genes)] = "A0A0G2JRQ6"
+
+#keep only gene name column of protein identification columns
+serum = serum[,c(1, 4, grep("sp3", colnames(serum)), grep("SPE", colnames(serum)))]
+plasma = plasma[,c(1, 4, grep("plasma_", colnames(plasma)))]
+
+#make dataframe
+serum = as.data.frame(serum)
+plasma = as.data.frame(plasma)
+
+#change gene names by removing everything after the ;
+f = function(x){
+  a = unlist(strsplit(x, split=';', fixed=TRUE))[1]
+  return(a)}  
+serum$Genes = unlist(lapply(serum$Genes, FUN = f))
+plasma$Genes = unlist(lapply(plasma$Genes, FUN = f))
+serum$Protein.Group = unlist(lapply(serum$Protein.Group, FUN = f))
+plasma$Protein.Group = unlist(lapply(plasma$Protein.Group, FUN = f))
+
+colnames(plasma) = c("Uniprot", "Genes", "plasma_1", "plasma_2", "plasma_3", "plasma_4", "plasma_5", "plasma_6", "plasma_7", "plasma_8")
+gene_names_serum = serum[,1:2]
+gene_names_plasma = plasma[,1:2]
+
+#make gene name the rownames
+serum$Genes = make.unique(serum$Genes)
+rownames(serum) = serum$Genes
+serum = serum[,colnames(serum)!="Genes"]
+serum = serum[,-1]
+
+plasma$Genes = make.unique(plasma$Genes)
+rownames(plasma) = plasma$Genes
+plasma = plasma[,colnames(plasma)!="Genes"]
+plasma = plasma[,-1]
+
+#check if columns have correct identification (if they are numerical)
+str(serum)
+str(plasma)
+
+#check if all missing are being recognized correctly
+sum(is.na(serum))
+sum(is.na(plasma))
+
+#separate the different protocols
+serum_sp3 = serum[,grepl("sp3", colnames(serum))]
+serum_SPE = serum[,grepl("SPE", colnames(serum))]
+
+#make a table with merged duplicates
+serum_SPE_merged = as.data.frame(matrix(NA, nrow = nrow(serum_sp3), ncol = ncol(serum_sp3)/2))
+rownames(serum_SPE_merged) = rownames(serum_sp3)
+serum_sp3_merged = serum_SPE_merged
+variance_sp3 = variance_SPE = serum_sp3_merged
+missing_sp3 = missing_SPE = serum_sp3_merged
+
+for(i in 1:8){
+  name = paste0("serum_",i)
+  
+  serum_sp3[,grep(name, colnames(serum_sp3))]
+  
+  serum_sp3_merged[,i] = apply(X = serum_sp3[,grep(name, colnames(serum_sp3))], function(x) mean(x, na.rm = TRUE), MARGIN = 1)
+  serum_SPE_merged[,i] = apply(X = serum_SPE[,grep(name, colnames(serum_SPE))], function(x) mean(x, na.rm = TRUE), MARGIN = 1)
+  
+  variance_sp3[,i] = apply(X = serum_sp3[,grep(name, colnames(serum_sp3))], function(x) max(x) - min(x), MARGIN = 1)
+  variance_SPE[,i] = apply(X = serum_SPE[,grep(name, colnames(serum_SPE))], function(x) max(x) - min(x), MARGIN = 1)
+  
+  missing_sp3[,i] = apply(X = serum_sp3[,grep(name, colnames(serum_sp3))], function(x) 0 + sum(is.na(x)), MARGIN = 1)
+  missing_SPE[,i] = apply(X = serum_SPE[,grep(name, colnames(serum_SPE))], function(x) 0 + sum(is.na(x)), MARGIN = 1)
+  
+  colnames(serum_sp3_merged)[i] = name
+  colnames(serum_SPE_merged)[i] = name
+  colnames(variance_sp3)[i] = name
+  colnames(variance_SPE)[i] = name
+  colnames(missing_sp3)[i] = name
+  colnames(missing_SPE)[i] = name
+}
+relative_variance_sp3 = variance_sp3/serum_sp3_merged
+relative_variance_SPE = variance_SPE/serum_SPE_merged
+serum_sp3_merged[serum_sp3_merged == "NaN"] = NA
+serum_SPE_merged[serum_SPE_merged == "NaN"] = NA
+
+# 
+# #transpose for summarized experiment
+# serum_sp3 = as.data.frame(t(serum_sp3))
+# serum_sp3_merged = as.data.frame(t(serum_sp3_merged))
+# serum_SPE = as.data.frame(t(serum_SPE))
+# serum_SPE_merged = as.data.frame(t(serum_SPE_merged))
+
+#make summarized experiments
+      #serum_sp3
+      abundance.columns <- 1:ncol(serum_sp3) # get abundance column numbers
+      clin = data.frame(label = colnames(serum_sp3),  #very limited clinical variables
+                        condition = c("control") ,
+                        replicate = 1:ncol(serum_sp3))
+      
+      serum_sp3$name = rownames(serum_sp3)
+      serum_sp3$ID = gene_names_serum$Protein.Group
+      experimental.design = clin
+      
+      se_serum_sp3 <- make_se(serum_sp3, abundance.columns, experimental.design)
+      
+      #serum_SPE
+      abundance.columns <- 1:ncol(serum_SPE) # get abundance column numbers
+      clin = data.frame(label = colnames(serum_SPE),  #very limited clinical variables
+                        condition = c("control") ,
+                        replicate = 1:ncol(serum_SPE))
+      
+      serum_SPE$name = rownames(serum_SPE)
+      serum_SPE$ID = gene_names_serum$Protein.Group
+      experimental.design = clin
+      
+      se_serum_SPE <- make_se(serum_SPE, abundance.columns, experimental.design)
+      
+      #serum_sp3_merged
+      abundance.columns <- 1:ncol(serum_sp3_merged) # get abundance column numbers
+      clin = data.frame(label = colnames(serum_sp3_merged),  #very limited clinical variables
+                        condition = c("control") ,
+                        replicate = 1:ncol(serum_sp3_merged))
+      
+      serum_sp3_merged$name =  rownames(serum_sp3_merged)
+      serum_sp3_merged$ID = gene_names_serum$Protein.Group
+      experimental.design = clin
+      
+      se_serum_sp3_merged <- make_se(serum_sp3_merged, abundance.columns, experimental.design)
+      
+      #serum_SPE_merged
+      abundance.columns <- 1:ncol(serum_SPE_merged) # get abundance column numbers
+      clin = data.frame(label = colnames(serum_SPE_merged),  #very limited clinical variables
+                        condition = c("control") ,
+                        replicate = 1:ncol(serum_SPE_merged))
+      
+      serum_SPE_merged$name =  rownames(serum_SPE_merged)
+      serum_SPE_merged$ID = gene_names_serum$Protein.Group
+      experimental.design = clin
+      
+      se_serum_SPE_merged <- make_se(serum_SPE_merged, abundance.columns, experimental.design)
+      
+      #plasma
+      abundance.columns <- 1:ncol(plasma) # get abundance column numbers
+      clin = data.frame(label = colnames(plasma),  #very limited clinical variables
+                        condition = c("control") ,
+                        replicate = 1:ncol(plasma))
+      
+      plasma$name =  rownames(plasma)
+      plasma$ID = gene_names_plasma$Uniprot
+      experimental.design = clin
+      
+      se_plasma <- make_se(plasma, abundance.columns, experimental.design)
+
+#save data
+write.csv(serum, "results/serum_raw_data.csv", row.names=TRUE)
+write.csv(plasma, "results/plasma_raw_data.csv", row.names=TRUE)
+
+write.csv(serum_sp3_merged, "results/serum_sp3_raw_data_no_duplicates.csv", row.names=TRUE)
+write.csv(serum_SPE_merged, "results/serum_SPE_raw_data_no_duplicates.csv", row.names=TRUE)
+
+write.csv(variance_sp3, "results/serum_sp3_variance_of_duplicates.csv", row.names=TRUE)
+write.csv(variance_SPE, "results/serum_SPE_variance_of_duplicates.csv", row.names=TRUE)
+
+write.csv(relative_variance_sp3, "results/serum_sp3_relative_variance_of_duplicates.csv", row.names=TRUE)
+write.csv(relative_variance_SPE, "results/serum_SPE_relative_variance_of_duplicates.csv", row.names=TRUE)
+
+write.csv(missing_sp3, "results/serum_sp3_missing_within_duplicates.csv", row.names=TRUE)
+write.csv(missing_SPE, "results/serum_sp3_missing_within_duplicates.csv", row.names=TRUE)
+```
+
+## Scatterplots duplicates
+
+```{r scatterplots duplicates}
+
+serum_sp3_A = serum_sp3[,grep("_A",colnames(serum_sp3))]
+serum_sp3_B = serum_sp3[,grep("_B",colnames(serum_sp3))]
+
+
+serum_SPE_A = serum_SPE[,grep("_A",colnames(serum_SPE))]
+serum_SPE_B = serum_SPE[,grep("_B",colnames(serum_SPE))]
+
+serum_sp3_A = reshape::melt(as.matrix(serum_sp3_A))
+serum_sp3_B = reshape::melt(as.matrix(serum_sp3_B))
+
+serum_SPE_A = reshape::melt(as.matrix(serum_SPE_A))
+serum_SPE_B = reshape::melt(as.matrix(serum_SPE_B))
+
+serum_sp3_long = as.data.frame(cbind(serum_sp3_A, serum_sp3_B$value))
+colnames(serum_sp3_long)[3:4] = c("duplicate_A", "duplicate_B")
+serum_sp3_long = na.omit(serum_sp3_long)
+serum_sp3_long$duplicate_A = log2(serum_sp3_long$duplicate_A)
+serum_sp3_long$duplicate_B = log2(serum_sp3_long$duplicate_B)
+
+serum_SPE_long = as.data.frame(cbind(serum_SPE_A, serum_SPE_B$value))
+colnames(serum_SPE_long)[3:4] = c("duplicate_A", "duplicate_B")
+serum_SPE_long = na.omit(serum_SPE_long)
+serum_SPE_long$duplicate_A = log2(serum_SPE_long$duplicate_A)
+serum_SPE_long$duplicate_B = log2(serum_SPE_long$duplicate_B)
+
+a = ggplot(serum_sp3_long, aes(x=duplicate_A, y=duplicate_B)) +
+  geom_point( color="darksalmon", alpha = 0.5) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("scatterplot duplicates serum sp3") +
+  theme_few()
+b = ggplot(serum_SPE_long, aes(x=duplicate_A, y=duplicate_B)) +
+  geom_point( color="yellow4", alpha = 0.5) + 
+  geom_abline(intercept = 0, slope = 1) +
+  ggtitle("scatterplot duplicates serum SPE") +
+  theme_few()
+
+ggarrange(a, b, ncol = 2, nrow = 1)
+ggsave("plots/scatterplots_duplicates.pdf", width = 11, height = 8/2, units = "in")
+
+```
+
+## Venn diagram proteins
+
+
+```{r venn diagram proteins}
+# install.packages("ggVennDiagram")
+library(ggVennDiagram)
+
+proteins_sp3 = rownames(serum_sp3)
+proteins_SPE = rownames(serum_SPE)
+proteins_plasma = rownames(plasma)
+proteins = list(serum_sp3 = proteins_sp3, 
+                serum_SPE = proteins_SPE, 
+                plasma = proteins_plasma)
+
+
+# 2D Venn diagram
+ggVennDiagram(proteins, set_color = c("darksalmon",   "yellow4", "mediumpurple1")) + 
+  scale_fill_gradient(low = "white", high = "grey50") + 
+    scale_color_manual(values = c("darksalmon",   "yellow4", "mediumpurple1"))
+
+ggsave(file = "plots/venn_diagram.pdf", width = 11/2, height = 8/2, units = "in")
+
+```
+
+## Filtering, normalization, and imputation
+
+```{r filtering, normalization, and imputation}
+set.seed(9)
+
+# Filter for proteins that are quantified in at least 2/3 of the samples.
+se_serum_sp3_filt <- filter_proteins(se_serum_sp3_merged, "fraction", min = 0.66)
+se_serum_SPE_filt <- filter_proteins(se_serum_SPE_merged, "fraction", min = 0.66)
+se_plasma_filt <- filter_proteins(se_plasma, "fraction", min = 0.66)
+
+se_serum_sp3_norm = normalize_vsn(se_serum_sp3_filt)
+se_serum_SPE_norm = normalize_vsn(se_serum_SPE_filt)
+se_plasma_norm = normalize_vsn(se_plasma_filt)
+
+  # imputation with several methods: MinProb, MAN, KNN
+#sp3 serum
+se_serum_sp3_imp_Minprob <- impute(se_serum_sp3_norm, fun = "MinProb", q=0.01)
+se_serum_sp3_imp_man <- impute(se_serum_sp3_norm, fun = "man", shift = 1.8, scale = 0.3)
+se_serum_sp3_imp_knn <- impute(se_serum_sp3_norm, fun = "knn", rowmax = 0.9)
+#SPE serum
+se_serum_SPE_imp_Minprob <- impute(se_serum_SPE_norm, fun = "MinProb", q=0.01)
+se_serum_SPE_imp_man <- impute(se_serum_SPE_norm, fun = "man", shift = 1.8, scale = 0.3)
+se_serum_SPE_imp_knn <- impute(se_serum_SPE_norm, fun = "knn", rowmax = 0.9)
+#plasma
+se_plasma_imp_Minprob <- impute(se_plasma_norm, fun = "MinProb", q=0.01)
+se_plasma_imp_man <- impute(se_plasma_norm, fun = "man", shift = 1.8, scale = 0.3)
+se_plasma_imp_knn <- impute(se_plasma_norm, fun = "knn", rowmax = 0.9)
+
+#put se's in a list
+se_serum = list(serum_sp3_duplicates = se_serum_sp3, 
+                serum_SPE_duplicates = se_serum_SPE, 
+                serum_sp3_merged = se_serum_sp3_merged, 
+                serum_SPE_merged = se_serum_SPE_merged,
+                serum_sp3_filt = se_serum_sp3_filt,
+                serum_SPE_filt = se_serum_SPE_filt,
+                serum_sp3_norm = se_serum_sp3_norm,
+                serum_SPE_norm = se_serum_SPE_norm,
+                serum_sp3_imp_Minprob = se_serum_sp3_imp_Minprob,
+                serum_sp3_imp_man = se_serum_sp3_imp_man,
+                serum_sp3_imp_knn = se_serum_sp3_imp_knn,
+                serum_SPE_imp_Minprob = se_serum_SPE_imp_Minprob,
+                serum_SPE_imp_man = se_serum_SPE_imp_man,
+                serum_SPE_imp_knn = se_serum_SPE_imp_knn)
+                
+
+se_plasma = list(plasma_raw = se_plasma,
+                 plasma_filt = se_plasma_filt,
+                 plasma_norm = se_plasma_norm,
+                 plasma_imp_Minprob = se_plasma_imp_Minprob,
+                 plasma_imp_man = se_plasma_imp_man,
+                 plasma_imp_knn = se_plasma_imp_knn)
+
+saveRDS(se_serum, "results/se_serum_list.rds")
+saveRDS(se_plasma, "results/se_plasma_list.rds")
+
+write.csv(as.data.frame(assay(se_plasma_norm)), "results/plasma_processed.csv")
+write.csv(as.data.frame(assay(se_serum_sp3_norm)), "results/serum_sp3_processed.csv")
+write.csv(as.data.frame(assay(se_serum_SPE_norm)), "results/serum_SPE_processed.csv")
+```
+
+## Missing inspection
+
+
+```{r missing inspection}
+
+#serum
+
+      vis_miss_plots = list()
+      frequency_plots = list()
+      intensity_distributions = list()
+      for(i in 1:8){
+        name = names(se_serum)[i]
+        vis_miss_plots[[i]] = vis_miss(as.data.frame(assay(se_serum[[i]])),show_perc = TRUE, show_perc_col = TRUE, cluster = F) +
+          ggtitle(name) 
+        frequency_plots[[i]] = plot_frequency(se_serum[[i]]) + ggtitle(name)
+        intensity_distributions[[i]] = plot_detect(se_serum[[i]])
+        print(paste0(name, " has ", ncol(se_serum[[i]]), " samples and ", nrow(se_serum[[i]]), " proteins"))
+      }
+      
+      #ggarrange
+      ggarrange(plotlist = vis_miss_plots, nrow = length(vis_miss_plots)/4, ncol = 4) 
+      ggsave("plots/missing_vis_miss_plots_serum.jpeg", width = 11*2, height = 8, units = "in") 
+      ggarrange(plotlist = frequency_plots, nrow = length(frequency_plots)/4, ncol = 4) 
+      ggsave("plots/missing_frequency_plots_serum.pdf", width = 11*2, height = 8, units = "in") 
+      ggarrange(plotlist = intensity_distributions, nrow = length(intensity_distributions)/4, ncol = 4, labels = names(se_serum)) 
+      ggsave("plots/missing_intensity_distributions_serum.pdf", width = 11*2, height = 8, units = "in") 
+      
+      imputation_plots = list()
+      
+      # Plot intensity distributions before and after imputation
+      imputation_plots[[1]] = plot_imputation(se_serum_sp3_norm, se_serum_sp3_imp_Minprob, 
+        se_serum_sp3_imp_man, se_serum_sp3_imp_knn)
+      imputation_plots[[2]] = plot_imputation(se_serum_SPE_norm, se_serum_SPE_imp_Minprob, 
+        se_serum_SPE_imp_man, se_serum_SPE_imp_knn)
+      ggarrange(plotlist = imputation_plots, nrow = 1, ncol = 2) 
+      ggsave("plots/imputation_plots_serum.pdf", width = 11, height = 8, units = "in")
+
+#plasma      
+      
+      vis_miss_plots = list()
+      frequency_plots = list()
+      intensity_distributions = list()
+      for(i in 1:3){
+        name = names(se_plasma)[i]
+        vis_miss_plots[[i]] = vis_miss(as.data.frame(assay(se_plasma[[i]])),show_perc = TRUE, show_perc_col = TRUE, cluster = F) +
+          ggtitle(name) 
+        frequency_plots[[i]] = plot_frequency(se_plasma[[i]]) + ggtitle(name)
+        intensity_distributions[[i]] = plot_detect(se_plasma[[i]])
+        print(paste0(name, " has ", ncol(se_plasma[[i]]), " samples and ", nrow(se_plasma[[i]]), " proteins"))
+      }
+      
+      #ggarrange
+      ggarrange(plotlist = vis_miss_plots, nrow = 1, ncol = 3) 
+      ggsave("plots/missing_vis_miss_plots_plasma.jpeg", width = 11*2, height = 4, units = "in") 
+      ggarrange(plotlist = frequency_plots, nrow = 1, ncol = 3) 
+      ggsave("plots/missing_frequency_plots_plasma.pdf", width = 11*2, height = 4, units = "in") 
+      ggarrange(plotlist = intensity_distributions, nrow = 1, ncol = 3, labels = names(se_serum)) 
+      ggsave("plots/missing_intensity_distributions_plasma.pdf", width = 11*2, height = 4, units = "in") 
+      
+      imputation_plots = list()
+      
+      # Plot intensity distributions before and after imputation
+      plot_imputation(se_plasma_norm, se_plasma_imp_Minprob, 
+        se_plasma_imp_man, se_plasma_imp_knn)
+      ggsave("plots/imputation_plots_plasma.pdf", width = 11, height = 8, units = "in")
+
+```
+
+## Density plot
+
+```{r Visualization 1b: Density plot}
+#figure raw
+      d = as.data.frame(assay(se_serum_sp3))
+      d = reshape2::melt(d)
+      d$technique = rep("serum_sp3", nrow(d))
+      
+      d2 = as.data.frame(assay(se_serum_SPE))
+      d2 = reshape2::melt(d2)
+      d2$technique = rep("serum_SPE", nrow(d2))
+      
+      d3 = as.data.frame(assay(se_plasma[["plasma_raw"]]))
+      d3 = reshape2::melt(d3)
+      d3$technique = rep("plasma", nrow(d3))
+      
+      d = as.data.frame(rbind(d, d2))
+      d = as.data.frame(rbind(d, d3))
+      
+      a = ggplot(d, aes(x=value, color=technique)) +
+        geom_density() +
+        theme_few() +
+        scale_colour_few() +
+        ggtitle("raw data") +
+        scale_color_manual(values = c("mediumpurple1", "darksalmon", "yellow4"))
+
+#figure filtered      
+      
+      d = as.data.frame(assay(se_serum_sp3_filt))
+      d = reshape2::melt(d)
+      d$technique = rep("sp3", nrow(d))
+      
+      d2 = as.data.frame(assay(se_serum_SPE_filt))
+      d2 = reshape2::melt(d2)
+      d2$technique = rep("SPE", nrow(d2))
+      
+      d3 = as.data.frame(assay(se_plasma[["plasma_filt"]]))
+      d3 = reshape2::melt(d3)
+      d3$technique = rep("plasma", nrow(d3))
+      
+      d = as.data.frame(rbind(d, d2))
+      d = as.data.frame(rbind(d, d3))
+      
+      b = ggplot(d, aes(x=value, color=technique)) +
+        geom_density() +
+        theme_few() +
+        scale_colour_few() +
+        ggtitle("filtered data")+
+        scale_color_manual(values = c("mediumpurple1", "darksalmon", "yellow4"))
+
+
+#figure normalized
+      
+      d = as.data.frame(assay(se_serum_sp3_norm))
+      d = reshape2::melt(d)
+      d$technique = rep("sp3", nrow(d))
+      
+      d2 = as.data.frame(assay(se_serum_SPE_norm))
+      d2 = reshape2::melt(d2)
+      d2$technique = rep("SPE", nrow(d2))
+      
+      d3 = as.data.frame(assay(se_plasma[["plasma_norm"]]))
+      d3 = reshape2::melt(d3)
+      d3$technique = rep("plasma", nrow(d3))
+      
+      d = as.data.frame(rbind(d, d2))
+      d = as.data.frame(rbind(d, d3))
+      
+      c = ggplot(d, aes(x=value, color=technique)) +
+        geom_density() +
+        theme_few() +
+        scale_colour_few() +
+        ggtitle("filtered and normalized data")+
+        scale_color_manual(values = c("mediumpurple1", "darksalmon", "yellow4"))
+
+ggarrange(a,b,c, ncol = 3, nrow = 1)
+ggsave(file = "plots/density.pdf", width = 11*1.5, height = 3, units = "in")
+```
+
+## Make boxplots and histograms data
+
+```{r make boxplots and histograms data}
+#visualize every dataset, also raw
+      
+      mean_expression_plot = function(data, file_sample, file_mass, title){
+        ggplot(data = reshape2::melt(data), aes(x=Var1, y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6)) +
+        ggtitle(title)
+      
+      ggsave(file_sample, width = 11, height = 8, units = "in")
+      
+      ggplot(data = reshape2::melt(data), aes(x=reorder(as.factor(Var2),value), y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6))+
+        ggtitle(title)
+      
+      ggsave(file_mass, width = 11*2, height = 8, units = "in")
+      }
+      
+      for(i in 1:length(se_serum)){
+        mean_expression_plot(data = t(assay(se_serum[[i]])), 
+                            file_sample = paste0("plots/boxplots_expression_each_sample_",
+                                                  names(se_serum)[i],
+                                                  ".pdf"),
+                            file_mass = paste0("plots/boxplots_expression_each_mass_",
+                                                  names(se_serum)[i],
+                                                  ".pdf"),
+                            title = names(se_serum)[i])
+      }
+
+      for(i in 1:length(se_plasma)){
+        mean_expression_plot(data = t(assay(se_plasma[[i]])), 
+                            file_sample = paste0("plots/boxplots_expression_each_sample_",
+                                                  names(se_plasma)[i],
+                                                  ".pdf"),
+                            file_mass = paste0("plots/boxplots_expression_each_mass_",
+                                                  names(se_plasma)[i],
+                                                  ".pdf"),
+                            title = names(se_plasma)[i])
+      }
+```
+
+## Heatmap
+
+```{r heatmap}
+
+set.seed(9)
+
+#functions for saving the heatmaps as figures
+        
+        save_pheatmap_pdf <- function(x, filename, width=11/2, height=8/2) {
+           stopifnot(!missing(x))
+           stopifnot(!missing(filename))
+           pdf(filename, width=width, height=height)
+           grid::grid.newpage()
+           grid::grid.draw(x$gtable)
+           dev.off()
+        }
+        
+        make_pheatmap <- function(data, cluster_cols = T, main = "Heatmap", clustering_method = "ward.D", show_rownames = T,
+                                  labels_col = clin$label){
+          p = pheatmap::pheatmap(data, name = "expression", cutree_cols = 1,
+                  show_colnames = T,
+                  show_rownames = show_rownames,
+                  fontsize = 4,
+                  fontsize_col = 4,
+                  fontsize_row = 2, 
+                  #annotation_col = annotation,
+                  #annotation_colors = annotation_colours,
+                  #annotation_row = annotation_row,
+                  color = viridis::viridis(100, option="G", direction = -1,),
+                  main = main,
+                  border_color=NA,
+                  cluster_cols = cluster_cols,
+                  cluster_rows = F,
+                  labels_col = labels_col,
+                  #clustering_method = clustering_method,
+                  na_col = "grey80")
+          return(p)
+        }
+        
+
+# loop for all datasets and all methods 
+        
+        for(i in 1:length(se_serum)){
+        title = names(se_serum)[i]
+        print(title)
+
+#create heatmaps with all patients
+        
+        #serum
+        #without grouping, all proteins
+        p = make_pheatmap(data = assay(se_serum[[i]]), cluster_cols = F, main = paste0("Heatmap all proteins\n",title, "\n not clustered"),  show_rownames = F,
+                          labels_col = se_serum[[i]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        # without grouping, 100 most variable proteins
+        d = assay(se_serum[[i]])
+        d2 = head(order(rowVars(d),decreasing = T),100)
+        p = make_pheatmap(data = d[d2,], cluster_cols = F, main = paste0("Heatmap 100 most variable proteins\n",title, "\nnot clustered"),
+                          labels_col = se_serum[[i]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_mostvar_",title,".pdf"))
+        }
+        
+        for(i in 1:length(se_plasma)){
+        title = names(se_plasma)[i]
+        print(title)
+        
+        #plasma
+        #without grouping, all proteins
+        p = make_pheatmap(data = assay(se_plasma[[i]]), cluster_cols = F, main = paste0("Heatmap all proteins\n",title, "\n not clustered"),  show_rownames = F,
+                          labels_col = se_plasma[[i]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        # without grouping, 100 most variable proteins
+        d = assay(se_plasma[[i]])
+        d2 = head(order(rowVars(d),decreasing = T),100)
+        p = make_pheatmap(data = d[d2,], cluster_cols = F, main = paste0("Heatmap 100 most variable proteins\n",title, "\nnot clustered"),
+                          labels_col = se_plasma[[i]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_mostvar_",title,".pdf"))
+        }
+        
+#heatmap with relative variance
+        
+        title = "relative_difference_duplicates"
+        
+        relative_variance_sp3 = relative_variance_sp3 * 100
+        relative_variance_sp3[relative_variance_sp3 > 300] = 300
+        relative_variance_sp3[relative_variance_sp3 == 0] = NA
+        
+        relative_variance_SPE = relative_variance_SPE * 100
+        relative_variance_SPE[relative_variance_SPE > 300] = 300
+        relative_variance_SPE[relative_variance_SPE == 0] = NA
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = relative_variance_sp3, cluster_cols = F, main = paste0("Heatmap all proteins sp3\n",title, "\n not clustered"),  show_rownames = F, labels_col = se_serum[["serum_sp3_merged"]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_sp3_",title,".pdf"))
+        
+        p = make_pheatmap(data = relative_variance_SPE, cluster_cols = F, main = paste0("Heatmap all proteins SPE\n",title, "\n not clustered"),  show_rownames = F, labels_col = se_serum[["serum_SPE_merged"]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_SPE_",title,".pdf"))
+        
+        title = "difference_duplicates"
+        
+        #variance_sp3[variance_sp3>100] = 100
+                        #without grouping, all proteins
+        p = make_pheatmap(data = variance_sp3, cluster_cols = F, main = paste0("Heatmap all proteins sp3\n",title, "\n not clustered"),  show_rownames = F, labels_col = se_serum[["serum_sp3_merged"]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_sp3_",title,".pdf"))
+        
+        #variance_SPE[variance_SPE>100] = 100
+                        #without grouping, all proteins
+        p = make_pheatmap(data = variance_SPE, cluster_cols = F, main = paste0("Heatmap all proteins SPE\n",title, "\n not clustered"),  show_rownames = F, labels_col = se_serum[["serum_SPE_merged"]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_SPE_",title,".pdf"))
+        
+#create heatmap of data before merging triplicates
+        
+        title = "raw_before_merging_duplicates" 
+        
+        #remove ridiculously high values
+        serum2 = log2(serum)
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = serum2, cluster_cols = F, main = paste0("Heatmap all proteins\n",title, "\n not clustered"),  show_rownames = F, labels_col = colnames(serum))
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_sp3_and_SPE",title,".pdf"))
+
+```
+
+## UMAP
+
+```{r UMAP}
+# # set seed for reproducible results
+set.seed(9)
+          group = c("mediumpurple1", "darksalmon", "yellow4")
+
+
+UMAP_density_plot = function(data,
+                             ggtitle = "UMAP with disease status labels",
+                             legend_name = "Disease status",
+                             labels = clin$Condition,
+                             file_location = "plots/UMAP_condition.pdf",
+                             file_location_labels = "plots/UMAP_condition_labels.pdf",
+                             colour_set = c("seagreen4", "slateblue1", "salmon")){
+      # run umap function
+      umap_out = umap::umap(data)
+      umap_plot = as.data.frame(umap_out$layout)
+
+      #add condition labels
+      umap_plot$group = labels
+
+      # plot umap
+      p1 = ggplot(umap_plot) + geom_point(aes(x=V1, y=V2, color = as.factor(group))) +
+        ggtitle(ggtitle) +
+          theme_few() +
+          scale_colour_few() +
+          scale_color_manual(name = legend_name,
+                           labels = levels(as.factor(umap_plot$group)),
+                           values = colour_set)
+
+      xdens <-
+        axis_canvas(p1, axis = "x") +
+        geom_density(data = umap_plot, aes(x = V1, fill = group, colour = group), alpha = 0.3) +
+        scale_fill_manual( values = colour_set) +
+        scale_colour_manual( values = colour_set)
+      ydens <-
+        axis_canvas(p1, axis = "y", coord_flip = TRUE) +
+        geom_density(data = umap_plot, aes(x = V2, fill = group, colour = group), alpha = 0.3) +
+        coord_flip() +
+        scale_fill_manual(values = colour_set) +
+        scale_colour_manual( values = colour_set)
+      p1 %>%
+        insert_xaxis_grob(xdens, grid::unit(1, "in"), position = "top") %>%
+        insert_yaxis_grob(ydens, grid::unit(1, "in"), position = "right") %>%
+        ggdraw()
+
+      p1
+      # save umap
+      ggsave(file_location, width = 11/2, height = 8/2, units = "in")
+
+      p1 + geom_text(label = rownames(umap_plot), x = umap_plot$V1, y = umap_plot$V2,
+                     hjust = 0, nudge_x = 1, size = 1.5, colour = "grey")
+
+      # save umap with labels
+      ggsave(file_location_labels, width = 11/2, height = 8/2, units = "in")
+}
+
+  d1 = t(assay(se_serum[["serum_sp3_imp_Minprob"]]))
+  d2 = t(assay(se_serum[["serum_SPE_imp_Minprob"]]))
+  d3 = t(assay(se_plasma[["plasma_imp_Minprob"]]))
+  
+  proteins_in_both_fluids = colnames(d1)[colnames(d1) %in% colnames(d3)]
+  proteins_in_both_fluids = proteins_in_both_fluids[proteins_in_both_fluids %in% colnames(d2)]
+  
+  d1 = d1[,proteins_in_both_fluids]
+  d2 = d2[,proteins_in_both_fluids]
+  d3 = d3[,proteins_in_both_fluids]
+  
+  d = as.data.frame(rbind(d1,d2))
+  d = as.data.frame(rbind(d,d3))
+  
+  labels_group = c(rep("serum_sp3", 8), rep("serum_SPE", 8), rep("plasma", 8))
+  title = "serum_vs_plasma"
+
+#perform plots with function
+        UMAP_density_plot(data = d,
+                          ggtitle = paste0("UMAP with fluid labels\n", title),
+                          legend_name = "Fluid labels",
+                          labels = labels_group,
+                          file_location = paste0("plots/UMAP_fluid_group_",title,".pdf"),
+                          file_location_labels = paste0("plots/UMAP_fluid_group_labels_",title,".pdf"),
+                          colour_set = group)
+```
+
+## SessionInfo
+
+```{r}
+sessionInfo()
+```
+
+

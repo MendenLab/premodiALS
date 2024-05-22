@@ -1,0 +1,554 @@
+---
+title: "Lipidomics Premodials"
+author: "Clara Meijs"
+date: "2024-02-26"
+output:
+  html_document:
+    df_print: paged
+    keep_md: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 5
+    theme: lumen
+---
+
+## Libraries
+
+```{r libraries}
+rm(list=ls())
+
+ library(pheatmap)
+ library(ggplot2)
+# library(matrixStats)
+# library(wesanderson)
+# library(clusterProfiler)
+# library(enrichplot)
+# library(msigdbr)
+ library(dichromat)
+# library(stringr)
+ library(dplyr)
+ library(ggrepel)
+ library(reshape2)
+ library(umap)
+ library(ggthemes)
+ library(cowplot)
+#library(MetaboAnalystR)
+library(vsn)
+library(DEP)
+library(readr)
+library(naniar)
+library(SummarizedExperiment)
+library(data.table)
+library(readxl)
+
+
+```
+
+## Set working directories
+
+```{r set-working-directories, message=FALSE, class.source = 'fold-hide'}
+# if you are using Rstudio run the following command, otherwise, set the working directory to the folder where this script is in
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# create directory for results
+dir.create(file.path(getwd(),'results'), showWarnings = FALSE)
+# create directory for plots
+dir.create(file.path(getwd(),'plots'), showWarnings = FALSE)
+```
+
+## Load data
+
+```{r load data}
+
+lipidomics = read.csv("data/2023-12-13 Plasma QCtest.csv")
+
+#remove QC rows and blank rows
+QC_rows =  grepl("QC", lipidomics$Sample.Name)
+blank_rows = lipidomics$Sample.Name == "blank"
+lipidomics = lipidomics[!(QC_rows | blank_rows),]
+
+#make first column the rownames and remove the sample name column
+rownames(lipidomics) = lipidomics[,1]
+lipidomics = lipidomics[,!colnames(lipidomics) == "Sample.Name"]
+
+#transpose matrix
+lipidomics = as.data.frame(t(lipidomics))
+
+#make all columns numeric
+for(i in 1:ncol(lipidomics)){lipidomics[,i] = as.numeric(lipidomics[,i])}
+
+#make a list for all dataframes
+lipidomics_data = list(raw_data = lipidomics)
+
+#deal with the duplicates
+samples = unlist(strsplit(colnames(lipidomics), "[.]"))
+samples = samples[grep(pattern = "pl", samples)]
+samples = unique(samples)
+
+lipidomics_data$merged = as.data.frame(matrix(NA, nrow = nrow(lipidomics_data$raw_data), ncol = length(samples)))
+colnames(lipidomics_data$merged) = samples
+rownames(lipidomics_data$merged) = rownames(lipidomics_data$data)
+lipidomics_data$difference = lipidomics_data$variance = lipidomics_data$missing = lipidomics_data$merged
+
+for(i in 1:length(samples)){
+      p = grep(pattern = samples[i], colnames(lipidomics_data$raw_data))
+      lipidomics_data$merged[,i] = apply(X = lipidomics_data$raw_data[,p], function(x) mean(x, na.rm = TRUE), MARGIN = 1)
+      lipidomics_data$variance[,i] = apply(X = lipidomics_data$raw_data[,p], function(x) var(x, na.rm = TRUE), MARGIN = 1)
+      lipidomics_data$missing[,i] = apply(X = lipidomics_data$raw_data[,p], function(x) 3 - sum(is.na(x)), MARGIN = 1)
+      lipidomics_data$difference[,i] = apply(X = lipidomics_data$raw_data[,p], function(x) max(x, na.rm = TRUE) - min(x, na.rm = TRUE), MARGIN = 1)
+      
+}
+
+
+#create a relative variance and relative difference dataset
+lipidomics_data$relative_variance = lipidomics_data$variance/lipidomics_data$merged
+lipidomics_data$relative_difference = lipidomics_data$difference/lipidomics_data$merged
+
+#make all the rownames the same
+for(i in 2:length(lipidomics_data)){
+  rownames(lipidomics_data[[i]]) = rownames(lipidomics_data$raw_data) 
+}
+
+
+#make summarized experiments
+      abundance.columns <- 1:ncol(lipidomics_data$merged) # get abundance column numbers
+      clin = data.frame(label = colnames(lipidomics_data$merged),  #very limited clinical variables
+                        condition = rep("pl", 8),
+                        replicate = 1:ncol(lipidomics_data$merged))
+      
+      lipidomics_data$merged$name = lipidomics_data$merged$ID = rownames(lipidomics_data$merged)
+      experimental.design = clin
+      
+      lipidomics_data$se <- make_se(lipidomics_data$merged, abundance.columns, experimental.design)
+      
+
+#save data
+library(writexl)
+write_xlsx(lipidomics_data[!names(lipidomics_data) =="se"], path =  "results/lipidomics_data.xlsx")
+```
+
+## Missing inspection
+
+
+```{r missing inspection}
+
+#heatmap missing before merging replicates
+vis_miss(lipidomics,show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+ggsave("plots/missing_vis_miss_heatmap_raw.png", width = 11, height = 8, units = "in")
+
+#heatmap missing with merged replicates
+vis_miss(lipidomics_data$merged, show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+ggsave("plots/missing_vis_miss_heatmap_merged.png", width = 11, height = 8, units = "in")
+# Filter for proteins that are quantified in at least 2/3 of the samples.
+lipidomics_data$se_filtered <- filter_proteins(lipidomics_data$se, "fraction", min = 0.66)
+
+#heatmap missing with filtered se
+vis_miss(as.data.frame(assay(lipidomics_data$se_filtered)),show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+ggsave("plots/missing_vis_miss_heatmap_filtered.png", width = 11, height = 8, units = "in")
+
+plot_frequency(lipidomics_data$se)
+ggsave("plots/frequency_met_identification_raw.pdf", width = 11, height = 8, units = "in")
+plot_frequency(lipidomics_data$se_filtered)
+ggsave("plots/frequency_met_identification_filtrered.pdf", width = 11, height = 8, units = "in")
+
+
+#dimensions of the data
+dim(lipidomics_data$se)
+dim(lipidomics_data$se_filtered)
+
+# % missing per patient:
+round(apply(X = as.data.frame(assay(lipidomics_data$se)), function(x) sum(is.na(x)), MARGIN = 2) / nrow(as.data.frame(assay(lipidomics_data$se))) * 100 , 1)
+round(apply(X = as.data.frame(assay(lipidomics_data$se_filtered)), function(x) sum(is.na(x)), MARGIN = 2) / nrow(as.data.frame(assay(lipidomics_data$se_filtered))) * 100 , 1)
+
+#normalization
+lipidomics_data$se_filt_norm <- normalize_vsn(lipidomics_data$se_filtered)
+meanSdPlot(lipidomics_data$se_filt_norm)
+
+
+write.csv(as.data.frame(assay(lipidomics_data$se_filtered)), "results/data_filtered.csv", row.names=TRUE)
+write.csv(as.data.frame(assay(lipidomics_data$se_filt_norm)), "results/data_filt_norm.csv", row.names=TRUE)
+
+
+```
+
+## Density plot variance
+
+```{r density plot variance}
+sample_cat = rep("pl", 8)
+lipidomics_data$variance_melt = reshape2::melt(t(100*lipidomics_data$relative_variance))
+lipidomics_data$variance_melt$sample_cat = as.factor(rep(sample_cat, nrow(lipidomics_data$relative_variance)))
+lipidomics_data$variance_melt = na.omit(lipidomics_data$variance_melt)
+lipidomics_data$variance_melt$value[lipidomics_data$variance_melt$value > 300] = 300
+
+ggplot(lipidomics_data$variance_melt, aes(x=value)) + 
+  geom_density()
+ggsave("plots/density_plot_variances_unstratified_no_correction.pdf", width = 11, height = 8, units = "in")
+
+ggplot(lipidomics_data$variance_melt, aes(x=value, y = reorder(as.factor(Var2),value))) + 
+  geom_boxplot() + coord_flip() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggsave("plots/boxplot_variances_unstratified_no_correction.pdf", width = 11*2, height = 4, units = "in")
+
+
+```
+
+##Density plot difference
+
+```{r density plot difference}
+sample_cat = rep("pl", 8)
+lipidomics_data$difference_melt = reshape2::melt(t(100*lipidomics_data$relative_difference))
+lipidomics_data$difference_melt$sample_cat = as.factor(rep(sample_cat, nrow(lipidomics_data$relative_difference)))
+lipidomics_data$difference_melt = na.omit(lipidomics_data$difference_melt)
+lipidomics_data$difference_melt$value[lipidomics_data$difference_melt$value > 300] = 300
+
+ggplot(lipidomics_data$difference_melt, aes(x=value)) + 
+  geom_density()
+ggsave("plots/density_plot_differences_unstratified_no_correction.pdf", width = 11, height = 8, units = "in")
+
+ggplot(lipidomics_data$difference_melt, aes(x=value, y = reorder(as.factor(Var2),value))) + 
+  geom_boxplot() + coord_flip() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggsave("plots/boxplot_differences_unstratified_no_correction.pdf", width = 11*2, height = 4, units = "in")
+
+
+```
+
+## Make boxplots data
+
+```{r make boxplots data}
+#visualize every dataset, also raw
+      
+      mean_expression_plot = function(data, file_sample, file_mass, title){
+        ggplot(data = reshape2::melt(data), aes(x=Var1, y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6)) +
+        ggtitle(title)
+      
+      ggsave(file_sample, width = 11, height = 8, units = "in")
+      
+      ggplot(data = reshape2::melt(data), aes(x=reorder(as.factor(Var2),value), y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6))+
+        ggtitle(title)
+      
+      ggsave(file_mass, width = 11*2, height = 8, units = "in")
+      }
+      
+      mean_expression_plot(data = t(assay(lipidomics_data$se)), 
+                            file_sample = "plots/boxplots_expression_each_sample.pdf",
+                            file_mass = "plots/boxplots_expression_each_mass.pdf",
+                            title = "Plasma lipidomics")
+
+```
+
+## Heatmap
+
+```{r heatmap}
+library(Polychrome)
+
+set.seed(9)
+
+#functions for saving the heatmaps as figures
+        
+        save_pheatmap_pdf <- function(x, filename, width=11/2, height=8/2) {
+           stopifnot(!missing(x))
+           stopifnot(!missing(filename))
+           pdf(filename, width=width, height=height)
+           grid::grid.newpage()
+           grid::grid.draw(x$gtable)
+           dev.off()
+        }
+        
+        make_pheatmap <- function(data, cluster_cols = T, main = "Heatmap", clustering_method = "ward.D", show_rownames = T,
+                                  labels_col = clin$label){
+          p = pheatmap::pheatmap(data, name = "expression", cutree_cols = 1,
+                  show_colnames = T,
+                  show_rownames = show_rownames,
+                  fontsize = 4,
+                  fontsize_col = 4,
+                  fontsize_row = 2, 
+                  #annotation_col = annotation,
+                  #annotation_colors = annotation_colours,
+                  #annotation_row = annotation_row,
+                  color = viridis::viridis(100, option="G", direction = -1,),
+                  main = main,
+                  border_color=NA,
+                  cluster_cols = cluster_cols,
+                  cluster_rows = F,
+                  labels_col = labels_col,
+                  #clustering_method = clustering_method,
+                  na_col = "grey80")
+          return(p)
+        }
+        
+
+        
+        title = "lipidomics" 
+
+#create heatmaps with all patients
+        
+        #without grouping, all proteins
+        p = make_pheatmap(data = assay(lipidomics_data$se), 
+                          cluster_cols = F, 
+                          main = paste0("Heatmap all lipids\n",title, "\n not clustered"), 
+                          show_rownames = F,
+                          labels_col = lipidomics_data$se@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        # without grouping, 100 most variable proteins
+        d = assay(lipidomics_data$se)
+        d2 = head(order(rowVars(d),decreasing = T),100)
+        p = make_pheatmap(data = d[d2,], 
+                          cluster_cols = F, 
+                          main = paste0("Heatmap 100 most variable lipids\n",title, "\nnot clustered"),
+                          labels_col = lipidomics_data$se@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_mostvar_",title,".pdf"))
+        
+        
+#heatmap with relative variance
+        
+        title = "relative_variance"
+        lipidomics_data$relative_variance = lipidomics_data$relative_variance * 100
+        lipidomics_data$relative_variance[lipidomics_data$relative_variance > 300] = 300
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = lipidomics_data$relative_variance, 
+                          cluster_cols = F, 
+                          main = paste0("Heatmap all lipids\n",title, "\n not clustered"),  
+                          show_rownames = F, 
+                          labels_col = lipidomics_data$se@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+#heatmap with relative difference
+        
+        title = "relative_difference"
+        lipidomics_data$relative_difference = lipidomics_data$relative_difference * 100
+        lipidomics_data$relative_difference[lipidomics_data$relative_difference > 300] = 300
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = lipidomics_data$relative_difference, 
+                          cluster_cols = F, 
+                          main = paste0("Heatmap all lipids\n",title, "\n not clustered"),  
+                          show_rownames = F, 
+                          labels_col = lipidomics_data$se@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+
+        
+#create heatmap of data before merging triplicates
+        
+        title = "raw_before_merging_triplicates" 
+        
+        #remove ridiculous high value
+        
+        data3 = lipidomics
+        q = quantile(data3, .9, na.rm = T)
+        data3[data3 > q] = q
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = data3, 
+                          cluster_cols = F, 
+                          main = paste0("Heatmap all lipids\n",title, "\n not clustered"),  
+                          show_rownames = F, 
+                          labels_col = colnames(data3))
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+
+        
+```
+
+## UMAP
+
+```{r UMAP}
+# set seed for reproducible results
+set.seed(9)
+group = "mediumpurple1"
+
+
+UMAP_density_plot = function(data, 
+                             ggtitle = "UMAP with disease status labels", 
+                             legend_name = "Disease status", 
+                             labels = clin$Condition, 
+                             file_location = "plots/UMAP_condition.pdf", 
+                             file_location_labels = "plots/UMAP_condition_labels.pdf",
+                             colour_set = c("seagreen4", "slateblue1", "salmon")){
+      # run umap function
+      umap_out = umap::umap(data, n_neighbors = 7)
+      umap_plot = as.data.frame(umap_out$layout)
+      
+      #add condition labels
+      umap_plot$group = labels
+
+      # plot umap
+      p1 = ggplot(umap_plot) + geom_point(aes(x=V1, y=V2, color = as.factor(group))) +
+        ggtitle(ggtitle) +
+          theme_few() +
+          scale_colour_few() +
+          scale_color_manual(name = legend_name, 
+                           labels = levels(as.factor(umap_plot$group)), 
+                           values = colour_set) 
+  
+      xdens <- 
+        axis_canvas(p1, axis = "x") + 
+        geom_density(data = umap_plot, aes(x = V1, fill = group, colour = group), alpha = 0.3) +
+        scale_fill_manual( values = colour_set) + 
+        scale_colour_manual( values = colour_set)
+      ydens <-
+        axis_canvas(p1, axis = "y", coord_flip = TRUE) + 
+        geom_density(data = umap_plot, aes(x = V2, fill = group, colour = group), alpha = 0.3) +
+        coord_flip() +
+        scale_fill_manual(values = colour_set) + 
+        scale_colour_manual( values = colour_set)
+      p1 %>%
+        insert_xaxis_grob(xdens, grid::unit(1, "in"), position = "top") %>%
+        insert_yaxis_grob(ydens, grid::unit(1, "in"), position = "right") %>%
+        ggdraw()
+      
+      p1
+      # save umap
+      ggsave(file_location, width = 11/2, height = 8/2, units = "in")
+      
+      p1 + geom_text(label = rownames(umap_plot), x = umap_plot$V1, y = umap_plot$V2,
+                     hjust = 0, nudge_x = 1, size = 1.5, colour = "grey")
+      
+      # save umap with labels
+      ggsave(file_location_labels, width = 11/2, height = 8/2, units = "in")
+}
+
+  d = as.data.frame(t(assay(lipidomics_data$se_filt_norm)))
+  labels_group = as.factor(rep("plasma", 8))
+  title = "filt_norm"
+      
+#perform plots with function      
+        UMAP_density_plot(data = d, 
+                          ggtitle = paste0("UMAP with fluid labels\n", title), 
+                          legend_name = "Fluid labels", 
+                          labels = labels_group, 
+                          file_location = paste0("plots/UMAP_fluid_group_",title,".pdf"),
+                          file_location_labels = paste0("plots/UMAP_fluid_group_labels_",title,".pdf"),
+                          colour_set = group)
+```
+
+## Scatterplots variance
+
+```{r scatterplots variance}
+combinations = list(c(1,2), c(1,3), c(2,3))
+combinations_text = c("1_and_2", "1_and_3", "2_and_3")
+plotlist = plotlist_relative =list()
+k = 1
+
+for(i in 1:length(samples)){
+  for(j in 1:length(combinations)){
+    print(paste0("i is ",i))
+    print(paste0("j is ",j))
+    title = paste0(samples[i], "_", combinations_text[j])
+    patient = grep(samples[i], colnames(lipidomics))
+    a = lipidomics[,patient]
+    a = a[,combinations[[j]]]
+    a = na.omit(a)
+    a = log2(a)
+    a$diff = abs(a[,1] - a[,2])
+    a$mean = apply(X = a[,1:2], MARGIN = 1, function(x) mean(x, na.rm = TRUE))
+    a$relative_diff = a$diff/a$mean
+    colnames(a) = c("t_1", "t_2", "diff", "mean", "relative_diff")
+
+    
+    x = ggplot(a, aes(x=t_1, y=t_2)) + 
+      geom_point(aes(color=diff), alpha = 0.5) + 
+      scale_colour_gradient(low = "lightpink", high="seagreen") +
+      ggtitle(title) 
+      #xlim(-8, 8) +
+      #ylim(-8, 8) 
+     
+    plotlist[[k]] = x
+    
+    x = ggplot(a, aes(x=t_1, y=t_2)) + 
+      geom_point(aes(color=relative_diff), alpha = 0.5) + 
+      scale_colour_gradient(low = "lightpink", high="seagreen", limits = c(0, 1)) +
+      ggtitle(title)
+      #xlim(-8, 8) +
+      #ylim(-8, 8)
+     
+    plotlist_relative[[k]] = x
+    
+    k = k+1
+  }
+}
+library(ggpubr)
+
+allplots <- ggarrange(plotlist=plotlist,
+                      labels = 1:length(plotlist),
+                      ncol = 3, nrow = (length(plotlist)/3))
+ggsave("plots/scatterplot_differences_plasma.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_relative <- ggarrange(plotlist=plotlist_relative,
+                      labels = 1:length(plotlist_relative),
+                      ncol = 3, nrow = (length(plotlist_relative)/3))
+ggsave("plots/scatterplot_relative_differences_plasma.pdf", width = 11*2, height = 8*3, units = "in")
+
+
+
+```
+
+## Overlap metabolomics and lipidomics
+
+```{r overlap metabolomics and lipidomics}
+metabolomics = read.csv(file = "/Users/clara.meijs/Desktop/PhD/Proj_PremodiALS/Metabolomics Andrej Kovac/results/data_filt_norm_imp_MinProb.csv", row.names = 1)
+
+metabolites = rownames(metabolomics)
+lipids = lipidomics_data$se_filt_norm@NAMES
+symbols = c(" ", ":", "-", "_", "[.]", "/")
+
+for(symbol in symbols){
+  metabolites = gsub(pattern = symbol, replacement = "", x = metabolites)
+  lipids = gsub(pattern = symbol, replacement = "", x = lipids)
+}
+
+sum(lipids %in% metabolites)
+
+# install.packages("ggVennDiagram")
+library(ggVennDiagram)
+
+lipids_and_metabolites = list(lipids = lipids, 
+                              metabolites = metabolites)
+
+
+# 2D Venn diagram
+ggVennDiagram(lipids_and_metabolites, set_color = c("darksalmon",   "yellow4")) + 
+    scale_fill_gradient(low = "white", high = "grey50") + 
+    scale_color_manual(values = c("darksalmon",   "yellow4"))
+
+ggsave(file = "plots/venn_diagram.pdf", width = 11/2, height = 8/2, units = "in")
+
+lipids_and_metabolites_overlap = list(
+  only_lipids = lipidomics_data$se_filt_norm@NAMES[!lipids %in% metabolites],
+  overlap = lipidomics_data$se_filt_norm@NAMES[lipids %in% metabolites],
+  only_metabolites = rownames(metabolomics)[!metabolites %in% lipids]
+)
+
+for(i in 1:length(lipids_and_metabolites_overlap)){
+  lipids_and_metabolites_overlap[[i]] = as.data.frame(lipids_and_metabolites_overlap[[i]])
+  }
+
+write_xlsx(lipids_and_metabolites_overlap, path = "results/lipids_and_metabolites_overlap.xlsx")
+
+
+```
+
+## Sessioninfo
+
+```{r}
+sessionInfo()
+```
+
+

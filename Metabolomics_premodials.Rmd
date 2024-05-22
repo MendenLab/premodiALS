@@ -1,0 +1,804 @@
+---
+title: "Metabolomics Premodials"
+author: "Clara Meijs"
+date: "2023-10-06"
+output:
+  html_document:
+    df_print: paged
+    keep_md: yes
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+    toc_depth: 5
+    theme: lumen
+---
+
+## Libraries
+
+```{r libraries}
+rm(list=ls())
+
+ library(pheatmap)
+ library(ggplot2)
+# library(matrixStats)
+# library(wesanderson)
+# library(clusterProfiler)
+# library(enrichplot)
+# library(msigdbr)
+ library(dichromat)
+# library(stringr)
+ library(dplyr)
+ library(ggrepel)
+ library(reshape2)
+ library(umap)
+ library(ggthemes)
+ library(cowplot)
+#library(MetaboAnalystR)
+library(vsn)
+library(DEP)
+library(readr)
+library(naniar)
+library(SummarizedExperiment)
+library(data.table)
+library(readxl)
+
+
+```
+
+## Set working directories
+
+```{r set-working-directories, message=FALSE, class.source = 'fold-hide'}
+# if you are using Rstudio run the following command, otherwise, set the working directory to the folder where this script is in
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# create directory for results
+dir.create(file.path(getwd(),'results'), showWarnings = FALSE)
+# create directory for plots
+dir.create(file.path(getwd(),'plots'), showWarnings = FALSE)
+```
+
+## Load data
+
+```{r load data}
+#load the three datasets
+tab1 <- read_excel("data/2023-09-22_Conc_TAb1.xlsx", skip = 1)
+tab2 <- read_excel("data/2023-09-22_Conc_TAb2.xlsx", skip = 1)
+tab3 <- read_excel("data/2023-09-22_Conc_TAb3.xlsx", skip = 1)
+#tab 1 and tab 2 are lipids
+
+#change sample identification name
+colnames(tab1)[colnames(tab1) == "Sample identification"] = "id"
+colnames(tab2)[colnames(tab2) == "Sample identification"] = "id"
+colnames(tab3)[colnames(tab3) == "Sample identification"] = "id"
+
+#make separate dataframe with the metabolites and their species
+mets1 = tab1[1,2:ncol(tab1)]
+mets2 = tab2[1,2:ncol(tab2)]
+mets3 = tab3[1,2:ncol(tab3)]
+mets = as.data.frame(cbind(mets1, mets2, mets3))
+met_species = as.data.frame(table(as.factor(mets)))
+met_species = met_species[order(met_species$Freq, decreasing = T),]
+
+#make separate dataframe with lipids
+lipids = as.data.frame(cbind(mets2, mets3))
+lipids_species = as.data.frame(table(as.factor(lipids)))
+lipids_species = lipids_species[order(lipids_species$Freq, decreasing = T),]
+
+
+#remove species row from data
+tab1 = tab1[-1,]
+tab2 = tab2[-1,]
+tab3 = tab3[-1,]
+
+#merge data into one big dataset
+tab12 = merge(tab1, tab2, by = "id")
+data = merge(tab12, tab3, by = "id")
+
+sum(is.na(data))
+
+#change < LOD and > ULOQ and <LLOQ to NA
+data_LOD_ULO_LLOQ = data #keep data with LOD, ULOQ and LLOQ as duplicates
+sum(data_LOD_ULO_LLOQ == "< LOD") #22022
+sum(data_LOD_ULO_LLOQ == "> ULOQ") #309
+sum(data_LOD_ULO_LLOQ == "< LLOQ") #1128
+sum(data_LOD_ULO_LLOQ == "NA") #10900
+sum(is.na(data_LOD_ULO_LLOQ)) #0
+#eventually, we need to use these different types of missing for mixed imputation
+
+data[data == "< LOD"] = NA
+data[data == "> ULOQ"] = NA
+data[data == "< LLOQ"] = NA
+data[data == "NA"] = NA
+sum(is.na(data)) #34359
+
+#transpose for summarized experiment
+data = as.data.frame(t(data))
+colnames(data) = data[1,]
+data = data[-1,]
+
+data <- mutate_all(data, function(x) as.numeric(as.character(x))) #ignore warning
+
+#deal with the duplicates
+clin = data.frame(label = colnames(data),  #very limited clinical variables
+                  condition = unlist(lapply(X = colnames(data), function(x)  unlist(strsplit(x, split='/', fixed=TRUE))[1])),
+                  replicate = unlist(lapply(X = colnames(data), function(x)  unlist(strsplit(x, split='/', fixed=TRUE))[2])))
+clin[is.na(clin)] = 1
+
+data2 = as.data.frame(matrix(NA, nrow = nrow(data), ncol = length(unique(clin$condition))))
+colnames(data2) = unique(clin$condition)
+rownames(data2) = rownames(data)
+variance = missing = data2
+
+for(i in 1:length(unique(clin$condition))){
+  p = clin$label[clin$condition == unique(clin$condition)[i]]
+  if(length(p)>1){
+      data2[,i] = apply(X = data[,p], function(x) mean(x, na.rm = TRUE), MARGIN = 1)
+      variance[,i] = apply(X = data[,p], function(x) var(x, na.rm = TRUE), MARGIN = 1)
+      missing[,] = apply(X = data[,p], function(x) 3 - sum(is.na(x)), MARGIN = 1)
+  }
+}
+data2[,c("TF1", "TF2", "TF3", "TF4", "TF5", "TF6", "TF7", "TF8", "TFCTRL")] = data[,c("TF1", "TF2", "TF3", "TF4", "TF5", "TF6", "TF7", "TF8", "TFCTRL")]
+data2[data2 == "NaN"] = NA
+
+relative_variance = variance/data2
+
+#make summarized experiments
+      #all samples
+      abundance.columns <- 1:ncol(data2) # get abundance column numbers
+      clin = data.frame(label = colnames(data2),  #very limited clinical variables
+                        condition = c(rep("CSF", 8), rep("PL", 8), rep("TF", 9)) ,
+                        replicate = 1:ncol(data2))
+      
+      data2$name = data2$ID = rownames(data2)
+      experimental.design = clin
+      
+      se <- make_se(data2, abundance.columns, experimental.design)
+      
+      #only CSF
+      abundance.columns <- grep("CSF", colnames(data2))
+      data3 = data2[,abundance.columns]
+      abundance.columns <- grep("CSF", colnames(data3))
+      clin = data.frame(label = colnames(data3),  #very limited clinical variables
+                        condition = rep("CSF", 8),
+                        replicate = 1:ncol(data3))
+      
+      data3$name = data3$ID = rownames(data3)
+      experimental.design = clin
+      
+      se_CSF <- make_se(data3, abundance.columns, experimental.design)
+      
+      #only PL
+      abundance.columns <- grep("PL", colnames(data2))
+      data3 = data2[,abundance.columns]
+      abundance.columns <- grep("PL", colnames(data3))
+      clin = data.frame(label = colnames(data3),  #very limited clinical variables
+                        condition = rep("PL", 8),
+                        replicate = 1:ncol(data3))
+      
+      data3$name = data3$ID = rownames(data3)
+      experimental.design = clin
+      
+      se_PL <- make_se(data3, abundance.columns , experimental.design)
+      
+      #only TF
+      abundance.columns <- grep("TF", colnames(data2))
+      data3 = data2[,abundance.columns]
+      abundance.columns <- grep("TF", colnames(data3))
+      clin = data.frame(label = colnames(data3),  #very limited clinical variables
+                        condition = rep("TF", ncol(data3)),
+                        replicate = 1:ncol(data3))
+      
+      data3$name = data3$ID = rownames(data3)
+      experimental.design = clin
+      
+      se_TF <- make_se(data3, abundance.columns , experimental.design)
+      
+#put se's in a list
+se_list = list(all_samples = se, CSF_samples = se_CSF, plasma_samples = se_PL, TF_samples = se_TF)
+saveRDS(se_list, "results/se_list.rds")
+
+#save data
+write.csv(data, "results/raw_data.csv", row.names=TRUE)
+write.csv(data2, "results/raw_data_no_duplicates.csv", row.names=TRUE)
+write.csv(variance, "results/variance_of_duplicates.csv", row.names=TRUE)
+write.csv(relative_variance, "results/relative_variance_of_duplicates.csv", row.names=TRUE)
+write.csv(missing, "results/missing_within_duplicates.csv", row.names=TRUE)
+write.csv(met_species, "results/metabolite_species_frequencies.csv", row.names=TRUE)
+write.csv(mets, "results/metabolite_species.csv", row.names=TRUE)
+```
+
+## Missing inspection
+
+```{r missing inspection}
+#heatmap missing before merging duplicates
+vis_miss(data,show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+ggsave("plots/missing_vis_miss_heatmap_raw.png", width = 11, height = 8, units = "in")
+
+
+#heatmap missing summarized experiment
+vis_miss(as.data.frame(assay(se)) ,show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+ggsave("plots/missing_vis_miss_heatmap_before.png", width = 11, height = 8, units = "in")
+# Filter for proteins that are quantified in at least 2/3 of the samples.
+se_filtered <- filter_proteins(se, "fraction", min = 0.66)
+vis_miss(as.data.frame(assay(se_filtered)),show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+ggsave("plots/missing_vis_miss_heatmap_after.png", width = 11, height = 8, units = "in")
+
+plot_frequency(se)
+ggsave("plots/frequency_met_identification_raw.pdf", width = 11, height = 8, units = "in")
+plot_frequency(se_filtered)
+ggsave("plots/frequency_met_identification_filtrered.pdf", width = 11, height = 8, units = "in")
+
+#also for each tissue separately:
+#CSF
+    #heatmap missing summarized experiment
+    vis_miss(as.data.frame(assay(se_CSF)) ,show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+    ggsave("plots/missing_vis_miss_heatmap_before_CSF.png", width = 11, height = 8, units = "in")
+    # Filter for proteins that are quantified in at least 2/3 of the samples.
+    se_filtered_CSF <- filter_proteins(se_CSF, "fraction", min = 0.66)
+    vis_miss(as.data.frame(assay(se_filtered_CSF)),show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+    ggsave("plots/missing_vis_miss_heatmap_after_CSF.png", width = 11, height = 8, units = "in")
+    
+    plot_frequency(se_CSF)
+    ggsave("plots/frequency_met_identification_raw_CSF.pdf", width = 11, height = 8, units = "in")
+    plot_frequency(se_filtered_CSF)
+    ggsave("plots/frequency_met_identification_filtrered_CSF.pdf", width = 11, height = 8, units = "in")
+#plasma
+    #heatmap missing summarized experiment
+    vis_miss(as.data.frame(assay(se_PL)) ,show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+    ggsave("plots/missing_vis_miss_heatmap_before_PL.png", width = 11, height = 8, units = "in")
+    # Filter for proteins that are quantified in at least 2/3 of the samples.
+    se_filtered_PL <- filter_proteins(se_PL, "fraction", min = 0.66)
+    vis_miss(as.data.frame(assay(se_filtered_PL)),show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+    ggsave("plots/missing_vis_miss_heatmap_after_PL.png", width = 11, height = 8, units = "in")
+    
+    plot_frequency(se_PL)
+    ggsave("plots/frequency_met_identification_raw_PL.pdf", width = 11, height = 8, units = "in")
+    plot_frequency(se_filtered_PL)
+    ggsave("plots/frequency_met_identification_filtrered_PL.pdf", width = 11, height = 8, units = "in")
+#TF
+    #heatmap missing summarized experiment
+    vis_miss(as.data.frame(assay(se_TF)) ,show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+    ggsave("plots/missing_vis_miss_heatmap_before_TF.png", width = 11, height = 8, units = "in")
+    # Filter for proteins that are quantified in at least 2/3 of the samples.
+    se_filtered_TF <- filter_proteins(se_TF, "fraction", min = 0.66)
+    vis_miss(as.data.frame(assay(se_filtered_TF)),show_perc = TRUE, show_perc_col = TRUE, cluster = F)
+    ggsave("plots/missing_vis_miss_heatmap_after_TF.png", width = 11, height = 8, units = "in")
+    
+    plot_frequency(se_TF)
+    ggsave("plots/frequency_met_identification_raw_TF.pdf", width = 11, height = 8, units = "in")
+    plot_frequency(se_filtered_TF)
+    ggsave("plots/frequency_met_identification_filtrered_TF.pdf", width = 11, height = 8, units = "in")
+
+#dimensions of the data
+dim(se)
+dim(se_filtered)
+dim(se_CSF)
+dim(se_filtered_CSF)
+dim(se_TF)
+dim(se_filtered_TF)
+dim(se_PL)
+dim(se_filtered_PL)
+
+#count number of lipids after filtering
+sum(se_filtered_PL@NAMES %in% colnames(lipids))
+
+# % missing per patient:
+round(apply(X = as.data.frame(assay(se)), function(x) sum(is.na(x)), MARGIN = 2) / nrow(as.data.frame(assay(se))) * 100 , 1)
+round(apply(X = as.data.frame(assay(se_filtered)), function(x) sum(is.na(x)), MARGIN = 2) / nrow(as.data.frame(assay(se_filtered))) * 100 , 1)
+
+#normalization
+se_filt_norm <- normalize_vsn(se_filtered)
+meanSdPlot(se_filt_norm)
+meanSdPlot(se_filtered)
+
+# Plot intensity distributions and cumulative fraction of proteins 
+# with and without missing values
+plot_detect(se)
+ggsave("plots/intensity_distribution_raw.pdf", width = 11, height = 8, units = "in")
+plot_detect(se_filtered)
+ggsave("plots/intensity_distribution_filtered.pdf", width = 11, height = 8, units = "in")
+
+# Impute missing data using random draws from a 
+# Gaussian distribution centered around a minimal value (for MNAR)
+MinProb_imputation <- impute(se_filt_norm, fun = "MinProb", q = 0.01)
+
+# Impute missing data using random draws from a 
+# manually defined left-shifted Gaussian distribution (for MNAR)
+manual_imputation <- impute(se_filt_norm, fun = "man", shift = 1.8, scale = 0.3)
+
+# Impute missing data using the k-nearest neighbour approach (for MAR)
+knn_imputation <- impute(se_filt_norm, fun = "knn", rowmax = 0.9)
+
+# Plot intensity distributions before and after imputation
+plot_imputation(se_filt_norm, MinProb_imputation, 
+  manual_imputation, knn_imputation)
+ggsave("plots/intensity_distribution_imputations.pdf", width = 11, height = 8, units = "in")
+
+
+se_list = list(se, se_filtered, se_filt_norm, MinProb_imputation, manual_imputation, knn_imputation)
+names(se_list) = c("raw", "filered", "filt_norm", "filt_norm_imp_MinProb", "filt_norm_imp_man", "filt_norm_imp_knn")
+
+write.csv(as.data.frame(assay(se_list[[2]])), "results/data_filtered.csv", row.names=TRUE)
+write.csv(as.data.frame(assay(se_list[[3]])), "results/data_filt_norm.csv", row.names=TRUE)
+write.csv(as.data.frame(assay(se_list[[4]])), "results/data_filt_norm_imp_MinProb.csv", row.names=TRUE)
+write.csv(as.data.frame(assay(se_list[[5]])), "results/data_filt_norm_imp_man.csv", row.names=TRUE)
+write.csv(as.data.frame(assay(se_list[[6]])), "results/data_filt_norm_imp_knn.csv", row.names=TRUE)
+
+
+
+
+```
+
+## Missing plot with different type of missing
+
+```{r missing plot with different type of missing}
+rownames(data_LOD_ULO_LLOQ) = data_LOD_ULO_LLOQ[,1]
+factors_melt = reshape2::melt(as.matrix(data_LOD_ULO_LLOQ))
+factors_melt = factors_melt[factors_melt$Var2 != "id",]
+factors_melt$Var1 = rep(rownames(data_LOD_ULO_LLOQ), 1019)
+
+categories = c("NA", "< LOD", "< LLOQ", "> ULOQ")
+factors_melt$value[!factors_melt$value %in% categories] = "not missing"
+table(factors_melt$value)
+# 
+# factors_melt$flip = 1:nrow(factors_melt)
+# factors_melt <- factors_melt[order(factors_melt$flip, decreasing = T),]
+
+library(reshape2); library(ggplot2)
+
+colors <- c("seagreen", "slateblue4", "tomato4", "darkgoldenrod4", "grey")
+
+ggplot(factors_melt, 
+    aes(x = Var1, y = Var2, fill = factor(value))) + 
+    geom_tile() + 
+    scale_fill_manual(values=colors) +
+    theme(axis.text.y=element_blank()) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+ggsave("plots/heatmap_missing_types_raw.pdf", width = 11, height = 8, units = "in")
+
+ggplot(factors_melt, 
+    aes(x = Var1, y = Var2, fill = factor(value))) + 
+    geom_tile() + 
+    scale_fill_manual(values=colors) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) 
+
+ggsave("plots/heatmap_missing_types_raw_detailed.pdf", width = 11*2, height = 8*8, units = "in", limitsize = FALSE)
+
+
+```
+
+## Density plot variance
+
+```{r density plot variance}
+sample_cat = c(rep("CSF", 8), rep("PL", 8), rep("TF", 9))
+variance_melt = reshape2::melt(t(100*relative_variance))
+variance_melt$sample_cat = as.factor(rep(sample_cat, 1019))
+variance_melt = na.omit(variance_melt)
+variance_melt$value[variance_melt$value > 300] = 300
+
+mean_relative_variance_each_metabolite = as.data.frame(apply(X = relative_variance, MARGIN = 1, function(x) mean(x, na.rm = TRUE))*100)
+colnames(mean_relative_variance_each_metabolite) = "value"
+mean_relative_variance_each_metabolite[mean_relative_variance_each_metabolite>300] = 300
+
+ggplot(variance_melt, aes(x=value)) + 
+  geom_density()
+ggsave("plots/density_plot_variances_unstratified.pdf", width = 11, height = 8, units = "in")
+
+ggplot(variance_melt, aes(x=value, color=sample_cat)) +
+  geom_density()
+ggsave("plots/density_plot_variances_tissue_strata.pdf", width = 11, height = 8, units = "in")
+
+ggplot(mean_relative_variance_each_metabolite, aes(x=value)) + 
+  geom_density()
+ggsave("plots/density_plot_mean_variances_unstratified.pdf", width = 11, height = 8, units = "in")
+
+ggplot(variance_melt, aes(x=value, y = reorder(as.factor(Var2),value))) + 
+  geom_boxplot() + coord_flip() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ggsave("plots/boxplot_variances_unstratified.pdf", width = 11*2, height = 8, units = "in")
+
+
+```
+
+## Make boxplots data
+
+```{r make boxplots data}
+#visualize every dataset, also raw
+      
+      mean_expression_plot = function(data, file_sample, file_mass, title){
+        ggplot(data = reshape2::melt(data), aes(x=Var1, y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6)) +
+        ggtitle(title)
+      
+      ggsave(file_sample, width = 11, height = 8, units = "in")
+      
+      ggplot(data = reshape2::melt(data), aes(x=reorder(as.factor(Var2),value), y=value)) +
+        geom_boxplot(color="darkseagreen4", fill="darkseagreen3") +
+        theme_set(theme_minimal()) +
+        theme_few() +
+        scale_colour_few() +
+        theme(legend.position = "none") +
+        theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+        theme(axis.text=element_text(size=6))+
+        ggtitle(title)
+      
+      ggsave(file_mass, width = 11*2, height = 8, units = "in")
+      }
+      
+      for(i in 1:length(se_list)){
+        mean_expression_plot(data = t(assay(se_list[[i]])), 
+                            file_sample = paste0("plots/boxplots_expression_each_sample_",
+                                                  names(se_list)[i],
+                                                  ".pdf"),
+                            file_mass = paste0("plots/boxplots_expression_each_mass_",
+                                                  names(se_list)[i],
+                                                  ".pdf"),
+                            title = names(se_list)[i])
+      }
+```
+
+## Heatmap
+
+```{r heatmap}
+library(Polychrome)
+
+set.seed(9)
+
+se_list_stratified = c(se_list, list(se_CSF = se_CSF, se_PL = se_PL, se_TF = se_TF, se_filtered_CSF = se_filtered_CSF, se_filtered_PL = se_filtered_PL, se_filtered_TF = se_filtered_TF))
+#functions for saving the heatmaps as figures
+        
+        save_pheatmap_pdf <- function(x, filename, width=11/2, height=8/2) {
+           stopifnot(!missing(x))
+           stopifnot(!missing(filename))
+           pdf(filename, width=width, height=height)
+           grid::grid.newpage()
+           grid::grid.draw(x$gtable)
+           dev.off()
+        }
+        
+        make_pheatmap <- function(data, cluster_cols = T, main = "Heatmap", clustering_method = "ward.D", show_rownames = T,
+                                  labels_col = clin$label){
+          p = pheatmap::pheatmap(data, name = "expression", cutree_cols = 1,
+                  show_colnames = T,
+                  show_rownames = show_rownames,
+                  fontsize = 4,
+                  fontsize_col = 4,
+                  fontsize_row = 2, 
+                  annotation_col = annotation,
+                  annotation_colors = annotation_colours,
+                  annotation_row = annotation_row,
+                  color = viridis::viridis(100, option="G", direction = -1,),
+                  main = main,
+                  border_color=NA,
+                  cluster_cols = cluster_cols,
+                  cluster_rows = F,
+                  labels_col = labels_col,
+                  #clustering_method = clustering_method,
+                  na_col = "grey80")
+          return(p)
+        }
+        
+
+# loop for all datasets and all methods 
+        
+        for(i in 1:length(se_list_stratified)){
+        title = paste0(names(se_list_stratified)[i])  
+        print(title)
+      
+        # get annotations and dataframe ready
+        #row annotation
+        names_mets = se_list_stratified[[1]]@NAMES
+        annotation_row = data.frame(metabolite_type = as.factor(mets[,names_mets]))
+        mycolors = glasbey.colors(length(unique(annotation_row$metabolite_type)))
+        names(mycolors) <- unique(annotation_row$metabolite_type)
+        
+        #col annotation
+        annotation = data.frame(group = as.factor(se_list_stratified[[i]]$condition))
+        rownames(annotation) = se_list_stratified[[i]]@colData$ID
+        annotation_colours <- list(
+          group = c(CSF = "mediumpurple1", PL = "darksalmon", TF = "yellow4"),
+          metabolite_type = list(mycolors)[[1]])
+        
+
+#create heatmaps with all patients
+        
+        #without grouping, all proteins
+        p = make_pheatmap(data = assay(se_list_stratified[[i]]), cluster_cols = F, main = paste0("Heatmap all metabolites\n",title, "\n not clustered"),  show_rownames = F,
+                          labels_col = se_list_stratified[[i]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        # without grouping, 100 most variable proteins
+        d = assay(se_list_stratified[[i]])
+        d2 = head(order(rowVars(d),decreasing = T),100)
+        p = make_pheatmap(data = d[d2,], cluster_cols = F, main = paste0("Heatmap 100 most variable metabolites\n",title, "\nnot clustered"),
+                          labels_col = se_list_stratified[[i]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_mostvar_",title,".pdf"))
+        }
+        
+#heatmap with relative variance
+        
+        title = "relative_variance"
+        
+        relative_variance = relative_variance * 100
+        
+        # get annotations and dataframe ready
+        #row annotation
+        names_mets = rownames(relative_variance)
+        annotation_row = data.frame(metabolite_type = as.factor(mets[,names_mets]))
+        mycolors = glasbey.colors(length(unique(annotation_row$metabolite_type)))
+        names(mycolors) <- unique(annotation_row$metabolite_type)
+        
+        #col annotation
+        annotation = data.frame(group = se_list_stratified[[1]]$condition)
+        rownames(annotation) = se_list_stratified[[1]]@colData$ID
+        annotation_colours <- list(
+          group = c(CSF = "mediumpurple1", PL = "darksalmon", TF = "yellow4"),
+          metabolite_type = list(mycolors)[[1]])
+        
+        relative_variance[relative_variance > 300] = 300
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = relative_variance, cluster_cols = F, main = paste0("Heatmap all metabolites\n",title, "\n not clustered"),  show_rownames = F, labels_col = se_list_stratified[[1]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        title = "variance"
+        
+        variance[variance>100] = 100
+                        #without grouping, all proteins
+        p = make_pheatmap(data = variance, cluster_cols = F, main = paste0("Heatmap all metabolites\n",title, "\n not clustered"),  show_rownames = F, labels_col = se_list_stratified[[1]]@colData$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+#create heatmap of data before merging triplicates
+        
+        title = "raw_before_merging_triplicates" 
+      
+        # get annotations and dataframe ready
+        #row annotation
+        names_mets = rownames(data)
+        annotation_row = data.frame(metabolite_type = as.factor(mets[,names_mets]))
+        mycolors = glasbey.colors(length(unique(annotation_row$metabolite_type)))
+        names(mycolors) <- unique(annotation_row$metabolite_type)
+        
+        #col annotation
+        clin2 = data.frame(label = colnames(data),  #very limited clinical variables
+                  condition = c(rep("CSF", 24), rep("PL", 24), rep("TF", 9)) ,
+                  replicate = 1:ncol(data))
+        annotation = data.frame(group = as.factor(clin2$condition))
+        rownames(annotation) = colnames(data)
+        annotation_colours <- list(
+          group = c(CSF = "mediumpurple1", PL = "darksalmon", TF = "yellow4"),
+          metabolite_type = list(mycolors)[[1]])
+        
+        #remove ridiculous high value
+        
+        data3 = data
+        q = quantile(data3, .9, na.rm = T)
+        data3[data3 > q] = q
+        
+                #without grouping, all proteins
+        p = make_pheatmap(data = data3, cluster_cols = F, main = paste0("Heatmap all metabolites\n",title, "\n not clustered"),  show_rownames = F, labels_col = clin2$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_",title,".pdf"))
+        
+        # without grouping, 100 most variable proteins
+        d = as.matrix(data3)
+        d2 = head(order(rowVars(d),decreasing = T),100)
+        p = make_pheatmap(data = d[d2,], cluster_cols = F, main = paste0("Heatmap 100 most variable metabolites\n",title, "\nnot clustered"), labels_col = clin2$label)
+        save_pheatmap_pdf(p, filename = paste0("plots/heatmap_mostvar_",title,".pdf"))
+        
+
+        
+```
+
+## UMAP
+
+```{r UMAP}
+# set seed for reproducible results
+set.seed(9)
+          group = c("mediumpurple1", "darksalmon", "yellow4")
+
+
+UMAP_density_plot = function(data, 
+                             ggtitle = "UMAP with disease status labels", 
+                             legend_name = "Disease status", 
+                             labels = clin$Condition, 
+                             file_location = "plots/UMAP_condition.pdf", 
+                             file_location_labels = "plots/UMAP_condition_labels.pdf",
+                             colour_set = c("seagreen4", "slateblue1", "salmon")){
+      # run umap function
+      umap_out = umap::umap(data)
+      umap_plot = as.data.frame(umap_out$layout)
+      
+      #add condition labels
+      umap_plot$group = labels
+
+      # plot umap
+      p1 = ggplot(umap_plot) + geom_point(aes(x=V1, y=V2, color = as.factor(group))) +
+        ggtitle(ggtitle) +
+          theme_few() +
+          scale_colour_few() +
+          scale_color_manual(name = legend_name, 
+                           labels = levels(as.factor(umap_plot$group)), 
+                           values = colour_set) 
+  
+      xdens <- 
+        axis_canvas(p1, axis = "x") + 
+        geom_density(data = umap_plot, aes(x = V1, fill = group, colour = group), alpha = 0.3) +
+        scale_fill_manual( values = colour_set) + 
+        scale_colour_manual( values = colour_set)
+      ydens <-
+        axis_canvas(p1, axis = "y", coord_flip = TRUE) + 
+        geom_density(data = umap_plot, aes(x = V2, fill = group, colour = group), alpha = 0.3) +
+        coord_flip() +
+        scale_fill_manual(values = colour_set) + 
+        scale_colour_manual( values = colour_set)
+      p1 %>%
+        insert_xaxis_grob(xdens, grid::unit(1, "in"), position = "top") %>%
+        insert_yaxis_grob(ydens, grid::unit(1, "in"), position = "right") %>%
+        ggdraw()
+      
+      p1
+      # save umap
+      ggsave(file_location, width = 11/2, height = 8/2, units = "in")
+      
+      p1 + geom_text(label = rownames(umap_plot), x = umap_plot$V1, y = umap_plot$V2,
+                     hjust = 0, nudge_x = 1, size = 1.5, colour = "grey")
+      
+      # save umap with labels
+      ggsave(file_location_labels, width = 11/2, height = 8/2, units = "in")
+}
+
+  d = t(assay(se_list[["filt_norm_imp_MinProb"]]))
+  labels_group = se_list[["filt_norm_imp_MinProb"]]$condition
+  title = "filt_norm_imp_MinProb"
+      
+#perform plots with function      
+        UMAP_density_plot(data = d, 
+                          ggtitle = paste0("UMAP with fluid labels\n", title), 
+                          legend_name = "Fluid labels", 
+                          labels = labels_group, 
+                          file_location = paste0("plots/UMAP_fluid_group_",title,".pdf"),
+                          file_location_labels = paste0("plots/UMAP_fluid_group_labels_",title,".pdf"),
+                          colour_set = group)
+```
+
+## Scatterplot variance 
+
+```{r scatterplots variance}
+triplicates = data[,1:(ncol(data)-9)]
+triplicates_IDs = se$label[1:(length(se$label)-9)]
+combinations = list(c(1,2), c(1,3), c(2,3))
+combinations_text = c("1_and_2", "1_and_3", "2_and_3")
+plotlist = plotlist_relative_var = plotlist_species = plotlist_relative_diff = list()
+k = 1
+
+for(i in 1:length(triplicates_IDs)){
+  for(j in 1:length(combinations)){
+    title = paste0(triplicates_IDs[i], "_", combinations_text[j])
+    patient = grep(triplicates_IDs[i], colnames(triplicates))
+    a = triplicates[,patient]
+    a = a[,combinations[[j]]]
+    a = na.omit(a)
+
+
+    a$var = apply(X = a[,1:2], MARGIN = 1, function(x) var(x, na.rm = TRUE))
+    a$mean = apply(X = a[,1:2], MARGIN = 1, function(x) mean(x, na.rm = TRUE))
+    a$difference = apply(X = a[,1:2], MARGIN = 1, function(x) max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+    a$relative_var = a$var/a$mean
+    a$relative_diff = a$difference/a$mean
+    a = na.omit(a)
+    a$relative_diff = abs(a$relative_diff)
+    a$relative_diff[a$relative_diff>1] = 1
+    colnames(a)[1:2] = c("t_1", "t_2")
+    a[,1:2] = log(a[,1:2])
+
+    a$species = as.factor(unlist(as.vector(mets[,rownames(a)])))
+    
+    x = ggplot(a, aes(x=t_1, y=t_2)) + 
+      geom_point(aes(color=var)) + 
+      scale_colour_gradient(low = "lightpink", high="seagreen", limits = c(-15, 15)) +
+      ggtitle(title) +
+      xlim(-8, 8) +
+      ylim(-8, 8) 
+     
+    plotlist[[k]] = x
+    
+    x = ggplot(a, aes(x=t_1, y=t_2)) + 
+      geom_point(aes(color=relative_var)) + 
+      scale_colour_gradient(low = "lightpink", high="seagreen", limits = c(-15, 15)) +
+      ggtitle(title)+
+      xlim(-8, 8) +
+      ylim(-8, 8)
+     
+    plotlist_relative_var[[k]] = x
+    
+    cols = glasbey.colors(length(levels(as.factor(a$species))))
+    
+    x = ggplot(a, aes(x=t_1, y=t_2)) + 
+          geom_point(aes(colour = species)) +
+          ggtitle(title) +
+          theme(legend.position="none")+
+          xlim(-8, 8) +
+          ylim(-8, 8) + 
+          scale_color_manual(values = mycolors)
+     
+    plotlist_species[[k]] = x
+    
+    x = ggplot(a, aes(x=t_1, y=t_2)) + 
+      geom_point(aes(color=relative_diff)) + 
+      scale_colour_gradient(low = "lightpink", high="seagreen", limits = c(0, 1)) +
+      ggtitle(title)+
+      xlim(-8, 8) +
+      ylim(-8, 8)
+     
+    plotlist_relative_diff[[k]] = x
+    
+    k = k+1
+  }
+}
+library(ggpubr)
+CSF_plotlist = plotlist[1:24]
+CSF_plotlist_relative_var = plotlist_relative_var[1:24]
+CSF_plotlist_relative_diff = plotlist_relative_diff[1:24]
+CSF_plotlist_species = plotlist_species[1:24]
+PL_plotlist = plotlist[25:length(plotlist)]
+PL_plotlist_relative_var = plotlist_relative_var[25:length(plotlist_relative_var)]
+PL_plotlist_relative_diff = plotlist_relative_diff[25:length(plotlist_relative_diff)]
+PL_plotlist_species = plotlist_species[25:length(plotlist_species)]
+
+
+allplots_CSF <- ggarrange(plotlist=CSF_plotlist,
+                      labels = 1:length(CSF_plotlist),
+                      ncol = 3, nrow = (length(CSF_plotlist)/3))
+ggsave("plots/scatterplot_variances_CSF.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_CSF_relative_var <- ggarrange(plotlist=CSF_plotlist_relative_var,
+                      labels = 1:length(CSF_plotlist_relative_var),
+                      ncol = 3, nrow = (length(CSF_plotlist_relative_var)/3))
+ggsave("plots/scatterplot_relative_variances_CSF.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_CSF_relative_diff <- ggarrange(plotlist=CSF_plotlist_relative_diff,
+                      labels = 1:length(CSF_plotlist_relative_diff),
+                      ncol = 3, nrow = (length(CSF_plotlist_relative_diff)/3))
+ggsave("plots/scatterplot_relative_differences_CSF.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_CSF_species <- ggarrange(plotlist=CSF_plotlist_species,
+                      labels = 1:length(CSF_plotlist_species),
+                      ncol = 3, nrow = (length(CSF_plotlist_species)/3))
+ggsave("plots/scatterplot_species_CSF.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_PL <- ggarrange(plotlist=PL_plotlist,
+                      labels = 1:length(PL_plotlist),
+                      ncol = 3, nrow = (length(PL_plotlist)/3))
+ggsave("plots/scatterplot_variances_PL.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_PL_relative_var <- ggarrange(plotlist=PL_plotlist_relative_var,
+                      labels = 1:length(PL_plotlist_relative_var),
+                      ncol = 3, nrow = (length(PL_plotlist_relative_var)/3))
+ggsave("plots/scatterplot_relative_variances_PL.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_PL_relative_diff <- ggarrange(plotlist=PL_plotlist_relative_diff,
+                      labels = 1:length(PL_plotlist_relative_diff),
+                      ncol = 3, nrow = (length(PL_plotlist_relative_diff)/3))
+ggsave("plots/scatterplot_relative_differences_PL.pdf", width = 11*2, height = 8*3, units = "in")
+
+allplots_PL_species <- ggarrange(plotlist=PL_plotlist_species,
+                      labels = 1:length(PL_plotlist_species),
+                      ncol = 3, nrow = (length(PL_plotlist_species)/3))
+ggsave("plots/scatterplot_species_PL.pdf", width = 11*2, height = 8*3, units = "in")
+
+```
+
+## Sessioninfo
+
+```{r}
+sessionInfo()
+```
+
+
